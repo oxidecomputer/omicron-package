@@ -171,7 +171,11 @@ impl Package {
         for path in &self.paths {
             add_directory_and_parents(&mut archive, path.to.parent().unwrap())?;
             let dst = archive_path(&path.to)?;
-            archive.append_dir_all(dst, &path.from)?;
+            if path.from.is_dir() {
+                archive.append_dir_all(dst, &path.from)?;
+            } else {
+                archive.append_path_with_name(&path.from, &dst)?;
+            }
         }
 
         // Attempt to add the rust binary, if one was built.
@@ -205,7 +209,11 @@ impl Package {
 
         // Add mapped paths.
         for path in &self.paths {
-            archive.append_dir_all(&path.to, &path.from)?;
+            if path.from.is_dir() {
+                archive.append_dir_all(&path.to, &path.from)?;
+            } else {
+                archive.append_path_with_name(&path.from, &path.to)?;
+            }
         }
 
         // Attempt to add the rust binary, if one was built.

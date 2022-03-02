@@ -10,7 +10,7 @@ mod test {
     use std::path::{Path, PathBuf};
     use tar::Archive;
 
-    fn get_next_path<'a, R: 'a + Read>(entries: &mut tar::Entries<'a, R>) -> PathBuf {
+    fn get_next<'a, R: 'a + Read>(entries: &mut tar::Entries<'a, R>) -> PathBuf {
         entries
             .next()
             .unwrap()
@@ -36,20 +36,25 @@ mod test {
         assert!(path.exists());
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
-        let mut entries = archive.entries().unwrap();
-        assert_eq!(Path::new("oxide.json"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut entries));
-        assert_eq!(
-            Path::new("root/opt/oxide/my-service"),
-            get_next_path(&mut entries)
-        );
+        let mut ents = archive.entries().unwrap();
+        assert_eq!(Path::new("oxide.json"), get_next(&mut ents));
+        assert_eq!(Path::new("root/"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next(&mut ents));
         assert_eq!(
             Path::new("root/opt/oxide/my-service/contents.txt"),
-            get_next_path(&mut entries)
+            get_next(&mut ents)
         );
-        assert!(entries.next().is_none());
+        assert_eq!(Path::new("root/"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next(&mut ents));
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service/single-file.txt"),
+            get_next(&mut ents)
+        );
+        assert!(ents.next().is_none());
     }
 
     // Tests a rust package being placed into a Zone image
@@ -68,35 +73,29 @@ mod test {
         assert!(path.exists());
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
-        let mut entries = archive.entries().unwrap();
-        assert_eq!(Path::new("oxide.json"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut entries));
-        assert_eq!(
-            Path::new("root/opt/oxide/my-service"),
-            get_next_path(&mut entries)
-        );
+        let mut ents = archive.entries().unwrap();
+        assert_eq!(Path::new("oxide.json"), get_next(&mut ents));
+        assert_eq!(Path::new("root/"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next(&mut ents));
         assert_eq!(
             Path::new("root/opt/oxide/my-service/contents.txt"),
-            get_next_path(&mut entries)
+            get_next(&mut ents)
         );
-        assert_eq!(Path::new("root/"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut entries));
-        assert_eq!(
-            Path::new("root/opt/oxide/my-service"),
-            get_next_path(&mut entries)
-        );
+        assert_eq!(Path::new("root/"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next(&mut ents));
         assert_eq!(
             Path::new("root/opt/oxide/my-service/bin"),
-            get_next_path(&mut entries)
+            get_next(&mut ents)
         );
         assert_eq!(
             Path::new("root/opt/oxide/my-service/bin/test-service"),
-            get_next_path(&mut entries)
+            get_next(&mut ents)
         );
-        assert!(entries.next().is_none());
+        assert!(ents.next().is_none());
     }
 
     // Tests a rust package being placed into a non-Zone image.
@@ -117,8 +116,8 @@ mod test {
         let path = package.get_output_path(&out.path());
         assert!(path.exists());
         let mut archive = Archive::new(File::open(path).unwrap());
-        let mut entries = archive.entries().unwrap();
-        assert_eq!(Path::new("test-service"), get_next_path(&mut entries));
-        assert!(entries.next().is_none());
+        let mut ents = archive.entries().unwrap();
+        assert_eq!(Path::new("test-service"), get_next(&mut ents));
+        assert!(ents.next().is_none());
     }
 }
