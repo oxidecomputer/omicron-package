@@ -5,13 +5,19 @@
 #[cfg(test)]
 mod test {
     use omicron_package::config;
-    use std::io::Read;
     use std::fs::File;
+    use std::io::Read;
     use std::path::{Path, PathBuf};
     use tar::Archive;
 
     fn get_next_path<'a, R: 'a + Read>(entries: &mut tar::Entries<'a, R>) -> PathBuf {
-        entries.next().unwrap().unwrap().path().unwrap().into_owned()
+        entries
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .unwrap()
+            .into_owned()
     }
 
     // Tests a package of arbitrary files is being placed into a Zone image
@@ -35,8 +41,14 @@ mod test {
         assert_eq!(Path::new("root/"), get_next_path(&mut entries));
         assert_eq!(Path::new("root/opt"), get_next_path(&mut entries));
         assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt/oxide/my-service/contents.txt"), get_next_path(&mut entries));
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service"),
+            get_next_path(&mut entries)
+        );
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service/contents.txt"),
+            get_next_path(&mut entries)
+        );
         assert!(entries.next().is_none());
     }
 
@@ -61,14 +73,29 @@ mod test {
         assert_eq!(Path::new("root/"), get_next_path(&mut entries));
         assert_eq!(Path::new("root/opt"), get_next_path(&mut entries));
         assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt/oxide/my-service/contents.txt"), get_next_path(&mut entries));
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service"),
+            get_next_path(&mut entries)
+        );
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service/contents.txt"),
+            get_next_path(&mut entries)
+        );
         assert_eq!(Path::new("root/"), get_next_path(&mut entries));
         assert_eq!(Path::new("root/opt"), get_next_path(&mut entries));
         assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt/oxide/my-service/bin"), get_next_path(&mut entries));
-        assert_eq!(Path::new("root/opt/oxide/my-service/bin/test-service"), get_next_path(&mut entries));
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service"),
+            get_next_path(&mut entries)
+        );
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service/bin"),
+            get_next_path(&mut entries)
+        );
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service/bin/test-service"),
+            get_next_path(&mut entries)
+        );
         assert!(entries.next().is_none());
     }
 
