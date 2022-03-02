@@ -1,0 +1,5 @@
+[package.my-service]
+service_name = "my-service"
+rust.binary_name = "test-service"
+rust.release = false
+zone = false

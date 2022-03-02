@@ -1,0 +1,9 @@
+[package.my-service]
+rust.binary_name = "test-service"
+rust.release = false
+service_name = "my-service"
+zone = true
+
+[[package.my-service.paths]]
+from = "tests/service-b/subdirectory"
+to = "/opt/oxide/my-service"

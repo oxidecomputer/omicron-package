@@ -1,0 +1,7 @@
+[package.my-service]
+service_name = "my-service"
+zone = true
+
+[[package.my-service.paths]]
+from = "tests/service-a/subdirectory"
+to = "/opt/oxide/my-service"
