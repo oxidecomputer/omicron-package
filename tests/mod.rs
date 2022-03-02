@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 mod test {
-    use omicron_package::config;
+    use omicron_zone_package::config;
     use std::fs::File;
     use std::io::Read;
     use std::path::{Path, PathBuf};
