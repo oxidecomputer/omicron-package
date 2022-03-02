@@ -74,10 +74,8 @@ fn add_directory_and_parents<W: std::io::Write>(
     parents.reverse();
 
     for parent in parents {
-        println!("Adding path to archive: {}", parent.to_string_lossy());
         let dst = archive_path(&parent)?;
         archive.append_dir(&dst, ".")?;
-        println!("Added path to archive: {}", parent.to_string_lossy());
     }
 
     Ok(())
@@ -136,7 +134,6 @@ impl Package {
     ) -> Result<()> {
         if let Some(blobs) = &self.blobs {
             let blobs_path = download_directory.join(&self.service_name);
-            println!("Downloading blobs to: {}", blobs_path.to_string_lossy());
             std::fs::create_dir_all(&blobs_path)?;
             for blob in blobs {
                 let blob_path = blobs_path.join(blob);
@@ -172,7 +169,6 @@ impl Package {
 
         // Add mapped paths.
         for path in &self.paths {
-            println!("Adding path: {:#?}", path);
             add_directory_and_parents(&mut archive, path.to.parent().unwrap())?;
             let dst = archive_path(&path.to)?;
             archive.append_dir_all(dst, &path.from)?;
@@ -180,11 +176,10 @@ impl Package {
 
         // Attempt to add the rust binary, if one was built.
         if let Some(rust_pkg) = &self.rust {
-            println!("Adding rust binary");
             let dst = Path::new("/opt/oxide").join(&self.service_name).join("bin");
             add_directory_and_parents(&mut archive, &dst)?;
             let dst = archive_path(&dst)?;
-            rust_pkg.add_binary_to_archive(&mut archive, &dst)?;
+            rust_pkg.add_binaries_to_archive(&mut archive, &dst)?;
         }
 
         // Add (and possibly download) blobs
@@ -210,13 +205,12 @@ impl Package {
 
         // Add mapped paths.
         for path in &self.paths {
-            println!("Adding path: {:#?}", path);
             archive.append_dir_all(&path.to, &path.from)?;
         }
 
         // Attempt to add the rust binary, if one was built.
         if let Some(rust_pkg) = &self.rust {
-            rust_pkg.add_binary_to_archive(&mut archive, Path::new(""))?;
+            rust_pkg.add_binaries_to_archive(&mut archive, Path::new(""))?;
         }
 
         // Add (and possibly download) blobs
@@ -237,7 +231,7 @@ pub struct RustPackage {
     /// The name of the compiled binary to be used.
     // TODO: Could be extrapolated to "produced build artifacts", we don't
     // really care about the individual binary file.
-    pub binary_name: String,
+    pub binary_names: Vec<String>,
 
     /// True if the package has been built in release mode.
     pub release: bool,
@@ -248,30 +242,28 @@ impl RustPackage {
     //
     // - `archive`: The archive to which the binary should be added
     // - `dst_directory`: The path where the binary should be added in the archive
-    fn add_binary_to_archive<W: std::io::Write>(
+    fn add_binaries_to_archive<W: std::io::Write>(
         &self,
         archive: &mut tar::Builder<W>,
         dst_directory: &Path,
     ) -> Result<()> {
-        archive
-            .append_path_with_name(
-                self.local_binary_path(self.release),
-                dst_directory.join(&self.binary_name),
-            )
-            .map_err(|err| anyhow!("Cannot append binary to tarfile: {}", err))?;
+        for name in &self.binary_names {
+            archive
+                .append_path_with_name(
+                    Self::local_binary_path(&name, self.release),
+                    dst_directory.join(&name),
+                )
+                .map_err(|err| anyhow!("Cannot append binary to tarfile: {}", err))?;
+        }
         Ok(())
     }
 
-    fn binary_name(&self) -> &str {
-        &self.binary_name
-    }
-
     // Returns the path to the compiled binary.
-    fn local_binary_path(&self, release: bool) -> PathBuf {
+    fn local_binary_path(name: &str, release: bool) -> PathBuf {
         format!(
             "target/{}/{}",
             if release { "release" } else { "debug" },
-            self.binary_name()
+            name,
         )
         .into()
     }

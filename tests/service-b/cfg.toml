@@ -1,5 +1,5 @@
 [package.my-service]
-rust.binary_name = "test-service"
+rust.binary_names = ["test-service"]
 rust.release = false
 service_name = "my-service"
 zone = true
