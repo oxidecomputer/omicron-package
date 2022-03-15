@@ -6,6 +6,8 @@
 
 use anyhow::{anyhow, Result};
 use serde_derive::Deserialize;
+use std::borrow::Cow;
+use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use tar::Builder;
@@ -42,6 +44,9 @@ fn open_tarfile(tarfile: &Path) -> Result<File> {
 
 // Returns the path as it should be placed within an archive, by
 // prepending "root/".
+//
+// Example:
+// - /opt/oxide -> root/opt/oxide
 fn archive_path(path: &Path) -> Result<PathBuf> {
     let leading_slash = std::path::MAIN_SEPARATOR.to_string();
     Ok(Path::new("root").join(&path.strip_prefix(leading_slash)?))
@@ -81,6 +86,23 @@ fn add_directory_and_parents<W: std::io::Write>(
     Ok(())
 }
 
+/// Trait for propagating progress information while constructing the package.
+pub trait Progress {
+    /// Updates the message displayed regarding progress constructing
+    /// the package.
+    fn set_message(&self, msg: impl Into<Cow<'static, str>>);
+
+    /// Increments the number of things which have completed.
+    fn increment(&self, delta: u64);
+}
+
+/// Implements [`Progress`] as a no-op.
+struct NoProgress;
+impl Progress for NoProgress {
+    fn set_message(&self, _msg: impl Into<Cow<'static, str>>) {}
+    fn increment(&self, _delta: u64) {}
+}
+
 /// A single package.
 #[derive(Deserialize, Debug)]
 pub struct Package {
@@ -113,25 +135,124 @@ impl Package {
 
     /// Constructs the package file in the output directory.
     pub async fn create(&self, output_directory: &Path) -> Result<File> {
+        self.create_internal(&NoProgress, output_directory).await
+    }
+
+    /// Returns the "total number of things to be done" when constructing a
+    /// package.
+    ///
+    /// This is intentionally vaguely defined, but it intended to
+    /// be a rough indication of progress when using [`Self::create_with_progress`].
+    pub fn get_total_work(&self) -> u64 {
+        // Tally up some information so we can report progress:
+        //
+        // - 1 tick for each included path
+        // - 1 tick for the rust binary
+        // - 1 tick per blob
+        let progress_total = self
+            .paths
+            .iter()
+            .map(|path| {
+                walkdir::WalkDir::new(&path.from)
+                    .follow_links(true)
+                    .into_iter()
+                    .count()
+            })
+            .sum::<usize>()
+            + if self.rust.is_some() { 1 } else { 0 }
+            + if let Some(blobs) = &self.blobs {
+                blobs.len()
+            } else {
+                0
+            };
+        progress_total.try_into().unwrap()
+    }
+
+    /// Identical to [`Self::create`], but allows a caller to receive updates
+    /// about progress while constructing the package.
+    pub async fn create_with_progress(
+        &self,
+        progress: &impl Progress,
+        output_directory: &Path,
+    ) -> Result<File> {
+        self.create_internal(progress, output_directory).await
+    }
+
+    async fn create_internal(
+        &self,
+        progress: &impl Progress,
+        output_directory: &Path,
+    ) -> Result<File> {
         if self.zone {
-            self.create_zone_package(output_directory).await
+            self.create_zone_package(progress, output_directory).await
         } else {
-            self.create_tarball_package(output_directory).await
+            self.create_tarball_package(progress, output_directory)
+                .await
         }
+    }
+
+    // Add mapped paths to the package.
+    async fn add_paths<W: std::io::Write>(
+        &self,
+        progress: &impl Progress,
+        archive: &mut Builder<W>,
+    ) -> Result<()> {
+        progress.set_message("adding paths");
+        for path in &self.paths {
+            if self.zone {
+                // Zone images require all paths to have their parents before
+                // they may be unpacked.
+                add_directory_and_parents(archive, path.to.parent().unwrap())?;
+            }
+            let from_root = std::fs::canonicalize(&path.from)?;
+            let entries = walkdir::WalkDir::new(&from_root)
+                // Pick up symlinked files.
+                .follow_links(true)
+                // Ensure the output tarball is deterministic.
+                .sort_by_file_name();
+            for entry in entries {
+                let entry = entry?;
+                let dst = &path.to.join(entry.path().strip_prefix(&from_root)?);
+                let dst = if self.zone {
+                    // Zone images must explicitly label all destination paths
+                    // as within "root/".
+                    archive_path(dst)?
+                } else {
+                    dst.to_path_buf()
+                };
+
+                if entry.file_type().is_dir() {
+                    archive.append_dir(&dst, ".")?;
+                } else if entry.file_type().is_file() {
+                    archive.append_path_with_name(entry.path(), &dst)?;
+                } else {
+                    panic!(
+                        "Unsupported file type: {:?} for {:?}",
+                        entry.file_type(),
+                        entry
+                    );
+                }
+                progress.increment(1);
+            }
+        }
+        Ok(())
     }
 
     // Adds blobs from S3 to the package.
     //
+    // - `progress`: Reports progress while adding blobs.
     // - `archive`: The archive to add the blobs into
     // - `package`: The package being constructed
     // - `download_directory`: The location to which the blobs should be downloaded
     // - `destination_path`: The destination path of the blobs within the archive
     async fn add_blobs<W: std::io::Write>(
         &self,
+        progress: &impl Progress,
         archive: &mut Builder<W>,
         download_directory: &Path,
         destination_path: &Path,
     ) -> Result<()> {
+        progress.set_message("adding blobs");
         if let Some(blobs) = &self.blobs {
             let blobs_path = download_directory.join(&self.service_name);
             std::fs::create_dir_all(&blobs_path)?;
@@ -142,17 +263,27 @@ impl Package {
                 if !blob_path.exists() {
                     download(&blob.to_string_lossy(), &blob_path).await?;
                 }
+                progress.increment(1);
             }
             archive.append_dir_all(&destination_path, &blobs_path)?;
         }
         Ok(())
     }
 
-    async fn create_zone_package(&self, output_directory: &Path) -> Result<File> {
+    async fn create_zone_package(
+        &self,
+        progress: &impl Progress,
+        output_directory: &Path,
+    ) -> Result<File> {
         // Create a tarball which will become an Omicron-brand image
         // archive.
         let tarfile = self.get_output_path(output_directory);
         let file = open_tarfile(&tarfile)?;
+
+        // TODO: Consider using async compression, async tar.
+        // It's not the *worst* thing in the world for a packaging tool to block
+        // here, but it would help the other async threads remain responsive if
+        // we avoided blocking.
         let gzw = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
         let mut archive = Builder::new(gzw);
         archive.mode(tar::HeaderMode::Deterministic);
@@ -168,28 +299,27 @@ impl Package {
         archive.append_file("oxide.json", &mut root_json.into_std().await)?;
 
         // Add mapped paths.
-        for path in &self.paths {
-            add_directory_and_parents(&mut archive, path.to.parent().unwrap())?;
-            let dst = archive_path(&path.to)?;
-            if path.from.is_dir() {
-                archive.append_dir_all(dst, &path.from)?;
-            } else {
-                archive.append_path_with_name(&path.from, &dst)?;
-            }
-        }
+        self.add_paths(progress, &mut archive).await?;
 
         // Attempt to add the rust binary, if one was built.
+        progress.set_message("adding rust binaries");
         if let Some(rust_pkg) = &self.rust {
             let dst = Path::new("/opt/oxide").join(&self.service_name).join("bin");
             add_directory_and_parents(&mut archive, &dst)?;
             let dst = archive_path(&dst)?;
             rust_pkg.add_binaries_to_archive(&mut archive, &dst)?;
+            progress.increment(1);
         }
 
         // Add (and possibly download) blobs
         let blob_dst = Path::new("/opt/oxide").join(&self.service_name).join(BLOB);
-        self.add_blobs(&mut archive, output_directory, &archive_path(&blob_dst)?)
-            .await?;
+        self.add_blobs(
+            progress,
+            &mut archive,
+            output_directory,
+            &archive_path(&blob_dst)?,
+        )
+        .await?;
 
         let file = archive
             .into_inner()
@@ -198,7 +328,11 @@ impl Package {
         Ok(file.finish()?)
     }
 
-    async fn create_tarball_package(&self, output_directory: &Path) -> Result<File> {
+    async fn create_tarball_package(
+        &self,
+        progress: &impl Progress,
+        output_directory: &Path,
+    ) -> Result<File> {
         // Create a tarball containing the necessary executable and auxiliary
         // files.
         let tarfile = self.get_output_path(output_directory);
@@ -208,21 +342,17 @@ impl Package {
         archive.mode(tar::HeaderMode::Deterministic);
 
         // Add mapped paths.
-        for path in &self.paths {
-            if path.from.is_dir() {
-                archive.append_dir_all(&path.to, &path.from)?;
-            } else {
-                archive.append_path_with_name(&path.from, &path.to)?;
-            }
-        }
+        self.add_paths(progress, &mut archive).await?;
 
         // Attempt to add the rust binary, if one was built.
+        progress.set_message("adding rust binaries");
         if let Some(rust_pkg) = &self.rust {
             rust_pkg.add_binaries_to_archive(&mut archive, Path::new(""))?;
+            progress.increment(1);
         }
 
         // Add (and possibly download) blobs
-        self.add_blobs(&mut archive, output_directory, &Path::new(BLOB))
+        self.add_blobs(progress, &mut archive, output_directory, &Path::new(BLOB))
             .await?;
 
         let file = archive
