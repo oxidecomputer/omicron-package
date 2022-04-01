@@ -204,7 +204,13 @@ impl Package {
                 // they may be unpacked.
                 add_directory_and_parents(archive, path.to.parent().unwrap())?;
             }
-            let from_root = std::fs::canonicalize(&path.from)?;
+            let from_root = std::fs::canonicalize(&path.from).map_err(|e| {
+                anyhow!(
+                    "failed to canonicalize \"{}\": {}",
+                    path.from.to_string_lossy(),
+                    e
+                )
+            })?;
             let entries = walkdir::WalkDir::new(&from_root)
                 // Pick up symlinked files.
                 .follow_links(true)
