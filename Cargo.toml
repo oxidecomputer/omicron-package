@@ -10,6 +10,7 @@ description = "Packaging tools for Oxide's control plane software"
 [dependencies]
 anyhow = "1.0"
 chrono = "0.4.19"
+filetime = "0.2.16"
 flate2 = "1.0.22"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1.0", features = [ "derive" ] }

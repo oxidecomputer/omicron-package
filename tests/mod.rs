@@ -4,11 +4,14 @@
 
 #[cfg(test)]
 mod test {
+    use anyhow::Result;
     use omicron_zone_package::config;
     use std::fs::File;
     use std::io::Read;
     use std::path::{Path, PathBuf};
     use tar::Archive;
+
+    use omicron_zone_package::package::download;
 
     fn get_next<'a, R: 'a + Read>(entries: &mut tar::Entries<'a, R>) -> PathBuf {
         entries
@@ -119,5 +122,18 @@ mod test {
         let mut ents = archive.entries().unwrap();
         assert_eq!(Path::new("test-service"), get_next(&mut ents));
         assert!(ents.next().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_download() -> Result<()> {
+        let out = tempfile::tempdir()?;
+
+        let url = "OVMF_CODE.fd";
+        let dst = out.path().join(url);
+
+        download(&url, &dst).await?;
+        download(&url, &dst).await?;
+
+        Ok(())
     }
 }
