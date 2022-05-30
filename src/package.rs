@@ -5,16 +5,16 @@
 //! Utility for bundling target binaries as tarfiles.
 
 use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
+use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
 use serde_derive::Deserialize;
 use std::borrow::Cow;
 use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use tar::Builder;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use std::str::FromStr;
-use chrono::{DateTime, Utc};
-use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
 
 // Path to the blob S3 Bucket.
 const S3_BUCKET: &str = "https://oxide-omicron-build.s3.amazonaws.com";
@@ -37,13 +37,17 @@ async fn download(source: &str, destination: &Path) -> Result<()> {
         // From S3, header looks like:
         //
         //    "Content-Length: 49283072"
-        let content_length = headers.get(CONTENT_LENGTH).ok_or_else(|| anyhow!("no content length!"))?;
+        let content_length = headers
+            .get(CONTENT_LENGTH)
+            .ok_or_else(|| anyhow!("no content length!"))?;
         let content_length: u64 = u64::from_str(content_length.to_str()?)?;
 
         // From S3, header looks like:
         //
         //    "Last-Modified: Fri, 27 May 2022 20:50:17 GMT"
-        let last_modified = headers.get(LAST_MODIFIED).ok_or_else(|| anyhow!("no last modified!"))?;
+        let last_modified = headers
+            .get(LAST_MODIFIED)
+            .ok_or_else(|| anyhow!("no last modified!"))?;
         let last_modified: DateTime<Utc> = last_modified.to_str()?.parse()?;
         let metadata_modified: DateTime<Utc> = metadata.modified()?.into();
 
