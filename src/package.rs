@@ -12,6 +12,9 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use tar::Builder;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use std::str::FromStr;
+use chrono::{DateTime, Utc};
+use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
 
 // Path to the blob S3 Bucket.
 const S3_BUCKET: &str = "https://oxide-omicron-build.s3.amazonaws.com";
@@ -20,12 +23,41 @@ const BLOB: &str = "blob";
 
 // Downloads "source" from S3_BUCKET to "destination".
 async fn download(source: &str, destination: &Path) -> Result<()> {
+    let url = format!("{}/{}", S3_BUCKET, source);
+    let client = reqwest::Client::new();
+
+    if destination.exists() {
+        // If destination exists, check against size and last modified time. If
+        // both are the same, then return Ok
+        let metadata = std::fs::metadata(&destination)?;
+
+        let head_response = client.head(&url).send().await?;
+        let headers = head_response.headers();
+
+        // From S3, header looks like:
+        //
+        //    "Content-Length: 49283072"
+        let content_length = headers.get(CONTENT_LENGTH).ok_or_else(|| anyhow!("no content length!"))?;
+        let content_length: u64 = u64::from_str(content_length.to_str()?)?;
+
+        // From S3, header looks like:
+        //
+        //    "Last-Modified: Fri, 27 May 2022 20:50:17 GMT"
+        let last_modified = headers.get(LAST_MODIFIED).ok_or_else(|| anyhow!("no last modified!"))?;
+        let last_modified: DateTime<Utc> = last_modified.to_str()?.parse()?;
+        let metadata_modified: DateTime<Utc> = metadata.modified()?.into();
+
+        if metadata.len() == content_length && metadata_modified == last_modified {
+            return Ok(());
+        }
+    }
+
     println!(
         "Downloading {} to {}",
         source,
         destination.to_string_lossy()
     );
-    let response = reqwest::get(format!("{}/{}", S3_BUCKET, source)).await?;
+    let response = client.get(url).send().await?;
     let mut file = tokio::fs::File::create(destination).await?;
     file.write_all(&response.bytes().await?).await?;
     Ok(())
@@ -264,11 +296,7 @@ impl Package {
             std::fs::create_dir_all(&blobs_path)?;
             for blob in blobs {
                 let blob_path = blobs_path.join(blob);
-                // TODO: Check against hash, download if mismatch (i.e.,
-                // corruption/update).
-                if !blob_path.exists() {
-                    download(&blob.to_string_lossy(), &blob_path).await?;
-                }
+                download(&blob.to_string_lossy(), &blob_path).await?;
                 progress.increment(1);
             }
             archive.append_dir_all(&destination_path, &blobs_path)?;
