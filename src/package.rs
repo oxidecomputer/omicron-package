@@ -53,7 +53,7 @@ pub async fn download(source: &str, destination: &Path) -> Result<()> {
         //    "Content-Length: 49283072"
         let content_length = headers
             .get(CONTENT_LENGTH)
-            .ok_or_else(|| anyhow!("no content length!"))?;
+            .ok_or_else(|| anyhow!("no content length on {} HEAD response!", url))?;
         let content_length: u64 = u64::from_str(content_length.to_str()?)?;
 
         // From S3, header looks like:
@@ -61,7 +61,7 @@ pub async fn download(source: &str, destination: &Path) -> Result<()> {
         //    "Last-Modified: Fri, 27 May 2022 20:50:17 GMT"
         let last_modified = headers
             .get(LAST_MODIFIED)
-            .ok_or_else(|| anyhow!("no last modified on HEAD response!"))?;
+            .ok_or_else(|| anyhow!("no last modified on {} HEAD response!", url))?;
         let last_modified: DateTime<FixedOffset> =
             chrono::DateTime::parse_from_rfc2822(last_modified.to_str()?)?;
         let metadata = tokio::fs::metadata(&destination).await?;
