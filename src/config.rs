@@ -10,12 +10,43 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
 
+/// Describes the origin of an externally-built package.
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ExternalPackageSource {
+    /// Downloads the package from the following URL:
+    ///
+    /// <https://buildomat.eng.oxide.computer/public/file/oxidecomputer/REPO/image/COMMIT/PACKAGE>
+    Prebuilt {
+        repo: String,
+        commit: String,
+        sha256: String,
+    },
+    /// Expects that a package will be manually built and placed into the output
+    /// directory.
+    Manual,
+}
+
+/// Describes a package which originates from outside this repo.
+#[derive(Deserialize, Debug)]
+pub struct ExternalPackage {
+    #[serde(flatten)]
+    pub package: Package,
+
+    pub source: ExternalPackageSource,
+}
+
 /// Describes the configuration for a set of packages.
 #[derive(Deserialize, Debug)]
 pub struct Config {
-    /// Path to the packages to be installed.
+    /// Packages to be built and installed.
     #[serde(default, rename = "package")]
     pub packages: BTreeMap<String, Package>,
+
+    /// Packages to be installed, but which have been created outside this
+    /// repository.
+    #[serde(default, rename = "external_package")]
+    pub external_packages: BTreeMap<String, ExternalPackage>,
 }
 
 /// Errors which may be returned when parsing the server configuration.
