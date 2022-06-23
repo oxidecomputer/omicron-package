@@ -150,7 +150,7 @@ fn add_directory_and_parents<W: std::io::Write>(
     parents.reverse();
 
     for parent in parents {
-        let dst = archive_path(&parent)?;
+        let dst = archive_path(parent)?;
         archive.append_dir(&dst, ".")?;
     }
 
@@ -273,7 +273,9 @@ impl Package {
             if self.zone {
                 // Zone images require all paths to have their parents before
                 // they may be unpacked.
-                add_directory_and_parents(archive, path.to.parent().unwrap())?;
+                if let Some(parent) = path.to.parent() {
+                    add_directory_and_parents(archive, parent)?;
+                }
             }
             let from_root = std::fs::canonicalize(&path.from).map_err(|e| {
                 anyhow!(
@@ -425,7 +427,7 @@ impl Package {
         }
 
         // Add (and possibly download) blobs
-        self.add_blobs(progress, &mut archive, output_directory, &Path::new(BLOB))
+        self.add_blobs(progress, &mut archive, output_directory, Path::new(BLOB))
             .await?;
 
         let file = archive
@@ -461,7 +463,7 @@ impl RustPackage {
         for name in &self.binary_names {
             archive
                 .append_path_with_name(
-                    Self::local_binary_path(&name, self.release),
+                    Self::local_binary_path(name, self.release),
                     dst_directory.join(&name),
                 )
                 .map_err(|err| anyhow!("Cannot append binary to tarfile: {}", err))?;
