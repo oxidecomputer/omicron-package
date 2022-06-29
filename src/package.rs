@@ -193,6 +193,10 @@ pub struct Package {
 
     /// Identifies if the package should be packaged into a zone image.
     pub zone: bool,
+
+    /// A human-readable string with suggestions for setup if packaging fails.
+    #[serde(default)]
+    pub setup_hint: Option<String>,
 }
 
 impl Package {
@@ -275,6 +279,16 @@ impl Package {
                 // they may be unpacked.
                 add_directory_and_parents(archive, path.to.parent().unwrap())?;
             }
+            if !path.from.exists() {
+                // Strictly speaking, this check is redundant, but it provides
+                // a better error message.
+                return Err(anyhow!(
+                    "Cannot add path \"{}\" to package \"{}\" because it does not exist",
+                    path.from.to_string_lossy(),
+                    self.service_name,
+                ));
+            }
+
             let from_root = std::fs::canonicalize(&path.from).map_err(|e| {
                 anyhow!(
                     "failed to canonicalize \"{}\": {}",
