@@ -9,6 +9,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
 use serde_derive::Deserialize;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -193,6 +194,11 @@ pub struct Package {
 
     /// Identifies if the package should be packaged into a zone image.
     pub zone: bool,
+
+    /// Identifies the targets for which the package should be included.
+    ///
+    /// If ommitted, the package is assumed to be included for all targets.
+    pub only_for_targets: Option<BTreeMap<String, String>>,
 
     /// A human-readable string with suggestions for setup if packaging fails.
     #[serde(default)]
