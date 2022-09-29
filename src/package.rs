@@ -216,7 +216,8 @@ impl Package {
 
     /// Constructs the package file in the output directory.
     pub async fn create(&self, name: &str, output_directory: &Path) -> Result<File> {
-        self.create_internal(&NoProgress, name, output_directory).await
+        self.create_internal(&NoProgress, name, output_directory)
+            .await
     }
 
     /// Returns the "total number of things to be done" when constructing a
@@ -267,7 +268,8 @@ impl Package {
         output_directory: &Path,
     ) -> Result<File> {
         if self.zone {
-            self.create_zone_package(progress, name, output_directory).await
+            self.create_zone_package(progress, name, output_directory)
+                .await
         } else {
             self.create_tarball_package(progress, name, output_directory)
                 .await
