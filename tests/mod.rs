@@ -28,14 +28,15 @@ mod test {
     async fn test_package_as_zone() {
         // Parse the configuration
         let cfg = config::parse("tests/service-a/cfg.toml").unwrap();
-        let package = cfg.packages.get("my-service").unwrap();
+        let package_name = "my-service";
+        let package = cfg.packages.get(package_name).unwrap();
 
         // Create the packaged file
         let out = tempfile::tempdir().unwrap();
-        package.create(out.path()).await.unwrap();
+        package.create(package_name, out.path()).await.unwrap();
 
         // Verify the contents
-        let path = package.get_output_path(&out.path());
+        let path = package.get_output_path(package_name, &out.path());
         assert!(path.exists());
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
@@ -65,14 +66,15 @@ mod test {
     async fn test_rust_package_as_zone() {
         // Parse the configuration
         let cfg = config::parse("tests/service-b/cfg.toml").unwrap();
-        let package = cfg.packages.get("my-service").unwrap();
+        let package_name = "my-service";
+        let package = cfg.packages.get(package_name).unwrap();
 
         // Create the packaged file
         let out = tempfile::tempdir().unwrap();
-        package.create(out.path()).await.unwrap();
+        package.create(package_name, out.path()).await.unwrap();
 
         // Verify the contents
-        let path = package.get_output_path(&out.path());
+        let path = package.get_output_path(package_name, &out.path());
         assert!(path.exists());
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
@@ -109,14 +111,39 @@ mod test {
     async fn test_rust_package_as_tarball() {
         // Parse the configuration
         let cfg = config::parse("tests/service-c/cfg.toml").unwrap();
-        let package = cfg.packages.get("my-service").unwrap();
+        let package_name = "my-service";
+        let package = cfg.packages.get(package_name).unwrap();
 
         // Create the packaged file
         let out = tempfile::tempdir().unwrap();
-        package.create(out.path()).await.unwrap();
+        package.create(package_name, out.path()).await.unwrap();
 
         // Verify the contents
-        let path = package.get_output_path(&out.path());
+        let path = package.get_output_path(package_name, &out.path());
+        assert!(path.exists());
+        let mut archive = Archive::new(File::open(path).unwrap());
+        let mut ents = archive.entries().unwrap();
+        assert_eq!(Path::new("test-service"), get_next(&mut ents));
+        assert!(ents.next().is_none());
+    }
+
+    // Although package and service names are often the same, they do
+    // not *need* to be the same. This is an example of them both
+    // being explicitly different.
+    #[tokio::test]
+    async fn test_rust_package_with_disinct_service_name() {
+        // Parse the configuration
+        let cfg = config::parse("tests/service-d/cfg.toml").unwrap();
+        let package_name = "my-package";
+        let service_name = "my-service";
+        let package = cfg.packages.get(package_name).unwrap();
+
+        // Create the packaged file
+        let out = tempfile::tempdir().unwrap();
+        package.create(package_name, out.path()).await.unwrap();
+
+        // Verify the contents
+        let path = package.get_output_path(package_name, &out.path());
         assert!(path.exists());
         let mut archive = Archive::new(File::open(path).unwrap());
         let mut ents = archive.entries().unwrap();
