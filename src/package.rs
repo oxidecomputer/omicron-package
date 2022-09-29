@@ -9,6 +9,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
 use serde_derive::Deserialize;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -194,23 +195,29 @@ pub struct Package {
     /// Identifies if the package should be packaged into a zone image.
     pub zone: bool,
 
+    /// Identifies the targets for which the package should be included.
+    ///
+    /// If ommitted, the package is assumed to be included for all targets.
+    pub only_for_targets: Option<BTreeMap<String, String>>,
+
     /// A human-readable string with suggestions for setup if packaging fails.
     #[serde(default)]
     pub setup_hint: Option<String>,
 }
 
 impl Package {
-    pub fn get_output_path(&self, output_directory: &Path) -> PathBuf {
+    pub fn get_output_path(&self, name: &str, output_directory: &Path) -> PathBuf {
         if self.zone {
-            output_directory.join(format!("{}.tar.gz", self.service_name))
+            output_directory.join(format!("{}.tar.gz", name))
         } else {
-            output_directory.join(format!("{}.tar", self.service_name))
+            output_directory.join(format!("{}.tar", name))
         }
     }
 
     /// Constructs the package file in the output directory.
-    pub async fn create(&self, output_directory: &Path) -> Result<File> {
-        self.create_internal(&NoProgress, output_directory).await
+    pub async fn create(&self, name: &str, output_directory: &Path) -> Result<File> {
+        self.create_internal(&NoProgress, name, output_directory)
+            .await
     }
 
     /// Returns the "total number of things to be done" when constructing a
@@ -248,20 +255,23 @@ impl Package {
     pub async fn create_with_progress(
         &self,
         progress: &impl Progress,
+        name: &str,
         output_directory: &Path,
     ) -> Result<File> {
-        self.create_internal(progress, output_directory).await
+        self.create_internal(progress, name, output_directory).await
     }
 
     async fn create_internal(
         &self,
         progress: &impl Progress,
+        name: &str,
         output_directory: &Path,
     ) -> Result<File> {
         if self.zone {
-            self.create_zone_package(progress, output_directory).await
+            self.create_zone_package(progress, name, output_directory)
+                .await
         } else {
-            self.create_tarball_package(progress, output_directory)
+            self.create_tarball_package(progress, name, output_directory)
                 .await
         }
     }
@@ -360,11 +370,12 @@ impl Package {
     async fn create_zone_package(
         &self,
         progress: &impl Progress,
+        name: &str,
         output_directory: &Path,
     ) -> Result<File> {
         // Create a tarball which will become an Omicron-brand image
         // archive.
-        let tarfile = self.get_output_path(output_directory);
+        let tarfile = self.get_output_path(name, output_directory);
         let file = open_tarfile(&tarfile)?;
 
         // TODO: Consider using async compression, async tar.
@@ -418,11 +429,12 @@ impl Package {
     async fn create_tarball_package(
         &self,
         progress: &impl Progress,
+        name: &str,
         output_directory: &Path,
     ) -> Result<File> {
         // Create a tarball containing the necessary executable and auxiliary
         // files.
-        let tarfile = self.get_output_path(output_directory);
+        let tarfile = self.get_output_path(name, output_directory);
         let file = open_tarfile(&tarfile)?;
         // TODO: We could add compression here, if we'd like?
         let mut archive = Builder::new(file);
