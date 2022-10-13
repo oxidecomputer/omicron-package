@@ -4,114 +4,34 @@
 
 //! Utility for bundling target binaries as tarfiles.
 
-use anyhow::{anyhow, bail, Result};
-use chrono::{DateTime, FixedOffset, Utc};
-use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
+use crate::blob::BLOB;
+use crate::progress::{NoProgress, Progress};
+use anyhow::{anyhow, Context, Result};
 use serde_derive::Deserialize;
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use tar::Builder;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-// Path to the blob S3 Bucket.
-const S3_BUCKET: &str = "https://oxide-omicron-build.s3.amazonaws.com";
-// Name for the directory component where downloaded blobs are stored.
-const BLOB: &str = "blob";
-
-#[test]
-fn test_converts() {
-    let content_length = "1966080";
-    let last_modified = "Fri, 30 Apr 2021 22:37:39 GMT";
-
-    let content_length: u64 = u64::from_str(content_length).unwrap();
-    assert_eq!(1966080, content_length);
-
-    let _last_modified: DateTime<FixedOffset> =
-        chrono::DateTime::parse_from_rfc2822(last_modified).unwrap();
-}
-
-// Downloads "source" from S3_BUCKET to "destination".
-pub async fn download(source: &str, destination: &Path) -> Result<()> {
-    let url = format!("{}/{}", S3_BUCKET, source);
-    let client = reqwest::Client::new();
-
-    if destination.exists() {
-        // If destination exists, check against size and last modified time. If
-        // both are the same, then return Ok
-        let head_response = client.head(&url).send().await?;
-        if !head_response.status().is_success() {
-            bail!("head failed! {:?}", head_response);
-        }
-
-        let headers = head_response.headers();
-
-        // From S3, header looks like:
-        //
-        //    "Content-Length: 49283072"
-        let content_length = headers
-            .get(CONTENT_LENGTH)
-            .ok_or_else(|| anyhow!("no content length on {} HEAD response!", url))?;
-        let content_length: u64 = u64::from_str(content_length.to_str()?)?;
-
-        // From S3, header looks like:
-        //
-        //    "Last-Modified: Fri, 27 May 2022 20:50:17 GMT"
-        let last_modified = headers
-            .get(LAST_MODIFIED)
-            .ok_or_else(|| anyhow!("no last modified on {} HEAD response!", url))?;
-        let last_modified: DateTime<FixedOffset> =
-            chrono::DateTime::parse_from_rfc2822(last_modified.to_str()?)?;
-        let metadata = tokio::fs::metadata(&destination).await?;
-        let metadata_modified: DateTime<Utc> = metadata.modified()?.into();
-
-        if metadata.len() == content_length && metadata_modified == last_modified {
-            return Ok(());
-        }
-    }
-
-    println!(
-        "Downloading {} to {}",
-        source,
-        destination.to_string_lossy()
-    );
-
-    let response = client.get(url).send().await?;
-
-    // Store modified time from HTTPS response
-    let last_modified = response
-        .headers()
-        .get(LAST_MODIFIED)
-        .ok_or_else(|| anyhow!("no last modified on GET response!"))?;
-    let last_modified: DateTime<FixedOffset> =
-        chrono::DateTime::parse_from_rfc2822(last_modified.to_str()?)?;
-
-    // Write file bytes to destination
-    let mut file = tokio::fs::File::create(destination).await?;
-    file.write_all(&response.bytes().await?).await?;
-    drop(file);
-
-    // Set destination file's modified time based on HTTPS response
-    filetime::set_file_mtime(
-        destination,
-        filetime::FileTime::from_system_time(last_modified.into()),
-    )?;
-
-    Ok(())
-}
-
 // Helper to open a tarfile for reading/writing.
-fn open_tarfile(tarfile: &Path) -> Result<File> {
+fn create_tarfile<P: AsRef<Path> + std::fmt::Debug>(tarfile: P) -> Result<File> {
     OpenOptions::new()
         .write(true)
         .read(true)
         .truncate(true)
         .create(true)
-        .open(&tarfile)
-        .map_err(|err| anyhow!("Cannot create tarfile: {}", err))
+        .open(tarfile.as_ref())
+        .map_err(|err| anyhow!("Cannot create tarfile {:?}: {}", tarfile, err))
+}
+
+// Helper to open a tarfile for reading.
+fn open_tarfile<P: AsRef<Path> + std::fmt::Debug>(tarfile: P) -> Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .open(tarfile.as_ref())
+        .map_err(|err| anyhow!("Cannot open tarfile {:?}: {}", tarfile, err))
 }
 
 // Returns the path as it should be placed within an archive, by
@@ -150,6 +70,13 @@ fn add_directory_and_parents<W: std::io::Write>(
     let mut parents: Vec<&Path> = to.ancestors().collect::<Vec<&Path>>();
     parents.reverse();
 
+    if to.is_relative() {
+        return Err(anyhow!(
+            "Cannot add 'to = {}'; absolute path required",
+            to.to_string_lossy()
+        ));
+    }
+
     for parent in parents {
         let dst = archive_path(&parent)?;
         archive.append_dir(&dst, ".")?;
@@ -158,21 +85,58 @@ fn add_directory_and_parents<W: std::io::Write>(
     Ok(())
 }
 
-/// Trait for propagating progress information while constructing the package.
-pub trait Progress {
-    /// Updates the message displayed regarding progress constructing
-    /// the package.
-    fn set_message(&self, msg: impl Into<Cow<'static, str>>);
+/// Describes the origin of an externally-built package.
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum PackageSource {
+    /// Describes a package which should be assembled locally.
+    Local {
+        /// A list of blobs from the Omicron build S3 bucket which should be placed
+        /// within this package.
+        blobs: Option<Vec<PathBuf>>,
 
-    /// Increments the number of things which have completed.
-    fn increment(&self, delta: u64);
+        /// Configuration for packages containing Rust binaries.
+        rust: Option<RustPackage>,
+
+        /// A set of mapped paths which appear within the archive.
+        #[serde(default)]
+        paths: Vec<MappedPath>,
+    },
+
+    /// Downloads the package from the following URL:
+    ///
+    /// <https://buildomat.eng.oxide.computer/public/file/oxidecomputer/REPO/image/COMMIT/PACKAGE>
+    Prebuilt {
+        repo: String,
+        commit: String,
+        sha256: String,
+    },
+
+    /// A composite package, created by merging multiple tarballs into one.
+    ///
+    /// Currently, this package can only merge zone images.
+    Composite { packages: Vec<String> },
+
+    /// Expects that a package will be manually built and placed into the output
+    /// directory.
+    Manual,
 }
 
-/// Implements [`Progress`] as a no-op.
-struct NoProgress;
-impl Progress for NoProgress {
-    fn set_message(&self, _msg: impl Into<Cow<'static, str>>) {}
-    fn increment(&self, _delta: u64) {}
+/// Describes the output format of the package.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum PackageOutput {
+    /// A complete zone image, ready to be deployed to the target.
+    Zone {
+        /// "true" if the package is only used to construct composite packages.
+        ///
+        /// This can be used to signal that the package should *not* be
+        /// installed by itself.
+        #[serde(default)]
+        intermediate_only: bool,
+    },
+    /// A tarball, ready to be deployed to the target.
+    Tarball,
 }
 
 /// A single package.
@@ -181,19 +145,14 @@ pub struct Package {
     /// The name of the service name to be used on the target OS.
     pub service_name: String,
 
-    /// A list of blobs from the Omicron build S3 bucket which should be placed
-    /// within this package.
-    pub blobs: Option<Vec<PathBuf>>,
+    /// Identifies from where the package originates.
+    ///
+    /// For example, do we need to assemble it ourselves, or pull it from
+    /// somewhere else?
+    pub source: PackageSource,
 
-    /// Configuration for packages containing Rust binaries.
-    pub rust: Option<RustPackage>,
-
-    /// A set of mapped paths which appear within the archive.
-    #[serde(default)]
-    pub paths: Vec<MappedPath>,
-
-    /// Identifies if the package should be packaged into a zone image.
-    pub zone: bool,
+    /// Identifies what the output of the package should be.
+    pub output: PackageOutput,
 
     /// Identifies the targets for which the package should be included.
     ///
@@ -205,12 +164,38 @@ pub struct Package {
     pub setup_hint: Option<String>,
 }
 
+async fn new_zone_archive_builder(
+    package_name: &str,
+    output_directory: &Path,
+) -> Result<tar::Builder<flate2::write::GzEncoder<std::fs::File>>> {
+    let tarfile = output_directory.join(format!("{}.tar.gz", package_name));
+    let file = create_tarfile(tarfile)?;
+    // TODO: Consider using async compression, async tar.
+    // It's not the *worst* thing in the world for a packaging tool to block
+    // here, but it would help the other async threads remain responsive if
+    // we avoided blocking.
+    let gzw = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+    let mut archive = Builder::new(gzw);
+    archive.mode(tar::HeaderMode::Deterministic);
+
+    // The first file in the archive must always be a JSON file
+    // which identifies the format of the rest of the archive.
+    //
+    // See the OMICRON1(5) man page for more detail.
+    let mut root_json = tokio::fs::File::from_std(tempfile::tempfile()?);
+    let contents = r#"{"v":"1","t":"layer"}"#;
+    root_json.write_all(contents.as_bytes()).await?;
+    root_json.seek(std::io::SeekFrom::Start(0)).await?;
+    archive.append_file("oxide.json", &mut root_json.into_std().await)?;
+
+    Ok(archive)
+}
+
 impl Package {
     pub fn get_output_path(&self, name: &str, output_directory: &Path) -> PathBuf {
-        if self.zone {
-            output_directory.join(format!("{}.tar.gz", name))
-        } else {
-            output_directory.join(format!("{}.tar", name))
+        match self.output {
+            PackageOutput::Zone { .. } => output_directory.join(format!("{}.tar.gz", name)),
+            PackageOutput::Tarball => output_directory.join(format!("{}.tar", name)),
         }
     }
 
@@ -231,22 +216,30 @@ impl Package {
         // - 1 tick for each included path
         // - 1 tick for the rust binary
         // - 1 tick per blob
-        let progress_total = self
-            .paths
-            .iter()
-            .map(|path| {
-                walkdir::WalkDir::new(&path.from)
-                    .follow_links(true)
-                    .into_iter()
-                    .count()
-            })
-            .sum::<usize>()
-            + if self.rust.is_some() { 1 } else { 0 }
-            + if let Some(blobs) = &self.blobs {
-                blobs.len()
-            } else {
-                0
-            };
+        let progress_total = match &self.source {
+            PackageSource::Local { blobs, rust, paths } => {
+                let blob_work = if let Some(blobs) = blobs {
+                    blobs.len()
+                } else {
+                    0
+                };
+
+                let rust_work = if rust.is_some() { 1 } else { 0 };
+
+                let paths_work = paths
+                    .iter()
+                    .map(|path| {
+                        walkdir::WalkDir::new(&path.from)
+                            .follow_links(true)
+                            .into_iter()
+                            .count()
+                    })
+                    .sum::<usize>();
+
+                rust_work + blob_work + paths_work
+            }
+            _ => 1,
+        };
         progress_total.try_into().unwrap()
     }
 
@@ -267,27 +260,45 @@ impl Package {
         name: &str,
         output_directory: &Path,
     ) -> Result<File> {
-        if self.zone {
-            self.create_zone_package(progress, name, output_directory)
-                .await
-        } else {
-            self.create_tarball_package(progress, name, output_directory)
-                .await
+        match self.output {
+            PackageOutput::Zone { .. } => {
+                self.create_zone_package(progress, name, output_directory)
+                    .await
+            }
+            PackageOutput::Tarball => {
+                self.create_tarball_package(progress, name, output_directory)
+                    .await
+            }
         }
     }
 
-    // Add mapped paths to the package.
-    async fn add_paths<W: std::io::Write>(
+    async fn add_paths<W: std::io::Write + Send + Sync>(
         &self,
         progress: &impl Progress,
         archive: &mut Builder<W>,
+        paths: &Vec<MappedPath>,
+    ) -> Result<()> {
+        tokio::task::block_in_place(move || self.add_paths_sync(progress, archive, paths))?;
+        Ok(())
+    }
+
+    // Add mapped paths to the package.
+    fn add_paths_sync<W: std::io::Write>(
+        &self,
+        progress: &impl Progress,
+        archive: &mut Builder<W>,
+        paths: &Vec<MappedPath>,
     ) -> Result<()> {
         progress.set_message("adding paths");
-        for path in &self.paths {
-            if self.zone {
-                // Zone images require all paths to have their parents before
-                // they may be unpacked.
-                add_directory_and_parents(archive, path.to.parent().unwrap())?;
+
+        for path in paths {
+            match self.output {
+                PackageOutput::Zone { .. } => {
+                    // Zone images require all paths to have their parents before
+                    // they may be unpacked.
+                    add_directory_and_parents(archive, path.to.parent().unwrap())?;
+                }
+                PackageOutput::Tarball => {}
             }
             if !path.from.exists() {
                 // Strictly speaking, this check is redundant, but it provides
@@ -314,18 +325,26 @@ impl Package {
             for entry in entries {
                 let entry = entry?;
                 let dst = &path.to.join(entry.path().strip_prefix(&from_root)?);
-                let dst = if self.zone {
-                    // Zone images must explicitly label all destination paths
-                    // as within "root/".
-                    archive_path(dst)?
-                } else {
-                    dst.to_path_buf()
+
+                let dst = match self.output {
+                    PackageOutput::Zone { .. } => {
+                        // Zone images must explicitly label all destination paths
+                        // as within "root/".
+                        archive_path(dst)?
+                    }
+                    PackageOutput::Tarball => dst.to_path_buf(),
                 };
 
                 if entry.file_type().is_dir() {
                     archive.append_dir(&dst, ".")?;
                 } else if entry.file_type().is_file() {
-                    archive.append_path_with_name(entry.path(), &dst)?;
+                    archive
+                        .append_path_with_name(entry.path(), &dst)
+                        .context(format!(
+                            "Failed to add file '{}' to '{}'",
+                            entry.path().display(),
+                            dst.display()
+                        ))?;
                 } else {
                     panic!(
                         "Unsupported file type: {:?} for {:?}",
@@ -335,6 +354,33 @@ impl Package {
                 }
                 progress.increment(1);
             }
+        }
+        Ok(())
+    }
+
+    async fn add_rust<W: std::io::Write>(
+        &self,
+        progress: &impl Progress,
+        archive: &mut Builder<W>,
+    ) -> Result<()> {
+        match &self.source {
+            PackageSource::Local {
+                rust: Some(rust_pkg),
+                ..
+            } => {
+                progress.set_message("adding rust binaries");
+                let dst = match self.output {
+                    PackageOutput::Zone { .. } => {
+                        let dst = Path::new("/opt/oxide").join(&self.service_name).join("bin");
+                        add_directory_and_parents(archive, &dst)?;
+                        archive_path(&dst)?
+                    }
+                    PackageOutput::Tarball => PathBuf::from(""),
+                };
+                rust_pkg.add_binaries_to_archive(archive, &dst)?;
+                progress.increment(1);
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -354,15 +400,20 @@ impl Package {
         destination_path: &Path,
     ) -> Result<()> {
         progress.set_message("adding blobs");
-        if let Some(blobs) = &self.blobs {
-            let blobs_path = download_directory.join(&self.service_name);
-            std::fs::create_dir_all(&blobs_path)?;
-            for blob in blobs {
-                let blob_path = blobs_path.join(blob);
-                download(&blob.to_string_lossy(), &blob_path).await?;
-                progress.increment(1);
+        match &self.source {
+            PackageSource::Local {
+                blobs: Some(blobs), ..
+            } => {
+                let blobs_path = download_directory.join(&self.service_name);
+                std::fs::create_dir_all(&blobs_path)?;
+                for blob in blobs {
+                    let blob_path = blobs_path.join(blob);
+                    crate::blob::download(&blob.to_string_lossy(), &blob_path).await?;
+                    progress.increment(1);
+                }
+                archive.append_dir_all(&destination_path, &blobs_path)?;
             }
-            archive.append_dir_all(&destination_path, &blobs_path)?;
+            _ => (),
         }
         Ok(())
     }
@@ -373,51 +424,61 @@ impl Package {
         name: &str,
         output_directory: &Path,
     ) -> Result<File> {
-        // Create a tarball which will become an Omicron-brand image
-        // archive.
-        let tarfile = self.get_output_path(name, output_directory);
-        let file = open_tarfile(&tarfile)?;
+        let mut archive = new_zone_archive_builder(name, output_directory).await?;
 
-        // TODO: Consider using async compression, async tar.
-        // It's not the *worst* thing in the world for a packaging tool to block
-        // here, but it would help the other async threads remain responsive if
-        // we avoided blocking.
-        let gzw = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
-        let mut archive = Builder::new(gzw);
-        archive.mode(tar::HeaderMode::Deterministic);
+        match &self.source {
+            PackageSource::Local { paths, .. } => {
+                // Add mapped paths.
+                self.add_paths(progress, &mut archive, &paths).await?;
 
-        // The first file in the archive must always be a JSON file
-        // which identifies the format of the rest of the archive.
-        //
-        // See the OMICRON1(5) man page for more detail.
-        let mut root_json = tokio::fs::File::from_std(tempfile::tempfile()?);
-        let contents = r#"{"v":"1","t":"layer"}"#;
-        root_json.write_all(contents.as_bytes()).await?;
-        root_json.seek(std::io::SeekFrom::Start(0)).await?;
-        archive.append_file("oxide.json", &mut root_json.into_std().await)?;
+                // Attempt to add the rust binary, if one was built.
+                self.add_rust(progress, &mut archive).await?;
 
-        // Add mapped paths.
-        self.add_paths(progress, &mut archive).await?;
+                // Add (and possibly download) blobs
+                let blob_dst = Path::new("/opt/oxide").join(&self.service_name).join(BLOB);
+                self.add_blobs(
+                    progress,
+                    &mut archive,
+                    output_directory,
+                    &archive_path(&blob_dst)?,
+                )
+                .await?;
+            }
+            PackageSource::Composite { packages } => {
+                // For each of the component packages, open the tarfile, and add
+                // it to our top-level archive.
+                let tmp = tempfile::tempdir()?;
+                for component_package in packages {
+                    let component_path = output_directory.join(component_package);
+                    let gzr = flate2::read::GzDecoder::new(open_tarfile(component_path)?);
+                    let mut component_reader = tar::Archive::new(gzr);
+                    let entries = component_reader.entries()?;
 
-        // Attempt to add the rust binary, if one was built.
-        progress.set_message("adding rust binaries");
-        if let Some(rust_pkg) = &self.rust {
-            let dst = Path::new("/opt/oxide").join(&self.service_name).join("bin");
-            add_directory_and_parents(&mut archive, &dst)?;
-            let dst = archive_path(&dst)?;
-            rust_pkg.add_binaries_to_archive(&mut archive, &dst)?;
-            progress.increment(1);
+                    // First, unpack the existing entries
+                    for entry in entries {
+                        let mut entry = entry?;
+
+                        // Ignore the JSON header files
+                        if entry.path()? == Path::new("oxide.json") {
+                            continue;
+                        }
+
+                        let entry_unpack_path =
+                            tmp.path().join(entry.path()?.strip_prefix("root/")?);
+                        entry.unpack(&entry_unpack_path)?;
+                        assert!(entry_unpack_path.exists());
+
+                        archive.append_path_with_name(entry_unpack_path, entry.path()?)?;
+                    }
+                }
+            }
+            _ => {
+                return Err(anyhow!(
+                    "Cannot create a zone package with source: {:?}",
+                    self.source
+                ));
+            }
         }
-
-        // Add (and possibly download) blobs
-        let blob_dst = Path::new("/opt/oxide").join(&self.service_name).join(BLOB);
-        self.add_blobs(
-            progress,
-            &mut archive,
-            output_directory,
-            &archive_path(&blob_dst)?,
-        )
-        .await?;
 
         let file = archive
             .into_inner()
@@ -435,30 +496,29 @@ impl Package {
         // Create a tarball containing the necessary executable and auxiliary
         // files.
         let tarfile = self.get_output_path(name, output_directory);
-        let file = open_tarfile(&tarfile)?;
+        let file = create_tarfile(&tarfile)?;
         // TODO: We could add compression here, if we'd like?
         let mut archive = Builder::new(file);
         archive.mode(tar::HeaderMode::Deterministic);
 
-        // Add mapped paths.
-        self.add_paths(progress, &mut archive).await?;
+        match &self.source {
+            PackageSource::Local { paths, .. } => {
+                // Add mapped paths.
+                self.add_paths(progress, &mut archive, paths).await?;
 
-        // Attempt to add the rust binary, if one was built.
-        progress.set_message("adding rust binaries");
-        if let Some(rust_pkg) = &self.rust {
-            rust_pkg.add_binaries_to_archive(&mut archive, Path::new(""))?;
-            progress.increment(1);
+                // Attempt to add the rust binary, if one was built.
+                self.add_rust(progress, &mut archive).await?;
+
+                // Add (and possibly download) blobs
+                self.add_blobs(progress, &mut archive, output_directory, &Path::new(BLOB))
+                    .await?;
+
+                Ok(archive
+                    .into_inner()
+                    .map_err(|err| anyhow!("Failed to finalize archive: {}", err))?)
+            }
+            _ => return Err(anyhow!("Cannot create non-local tarball")),
         }
-
-        // Add (and possibly download) blobs
-        self.add_blobs(progress, &mut archive, output_directory, &Path::new(BLOB))
-            .await?;
-
-        let file = archive
-            .into_inner()
-            .map_err(|err| anyhow!("Failed to finalize archive: {}", err))?;
-
-        Ok(file)
     }
 }
 

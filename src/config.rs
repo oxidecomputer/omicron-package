@@ -4,37 +4,12 @@
 
 //! Configuration for a package.
 
-use crate::package::Package;
+use crate::package::{Package, PackageOutput};
+use crate::target::Target;
 use serde_derive::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
-
-/// Describes the origin of an externally-built package.
-#[derive(Deserialize, Debug)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum ExternalPackageSource {
-    /// Downloads the package from the following URL:
-    ///
-    /// <https://buildomat.eng.oxide.computer/public/file/oxidecomputer/REPO/image/COMMIT/PACKAGE>
-    Prebuilt {
-        repo: String,
-        commit: String,
-        sha256: String,
-    },
-    /// Expects that a package will be manually built and placed into the output
-    /// directory.
-    Manual,
-}
-
-/// Describes a package which originates from outside this repo.
-#[derive(Deserialize, Debug)]
-pub struct ExternalPackage {
-    #[serde(flatten)]
-    pub package: Package,
-
-    pub source: ExternalPackageSource,
-}
 
 /// Describes the configuration for a set of packages.
 #[derive(Deserialize, Debug)]
@@ -42,11 +17,29 @@ pub struct Config {
     /// Packages to be built and installed.
     #[serde(default, rename = "package")]
     pub packages: BTreeMap<String, Package>,
+}
 
-    /// Packages to be installed, but which have been created outside this
-    /// repository.
-    #[serde(default, rename = "external_package")]
-    pub external_packages: BTreeMap<String, ExternalPackage>,
+impl Config {
+    /// Returns target packages to be assembled on the builder machine.
+    pub fn packages_to_build(&self, target: &Target) -> BTreeMap<&String, &Package> {
+        self.packages
+            .iter()
+            .filter(|(_, pkg)| target.includes_package(&pkg))
+            .map(|(name, pkg)| (name, pkg))
+            .collect()
+    }
+
+    /// Returns target packages which should execute on the deployment machine.
+    pub fn packages_to_deploy(&self, target: &Target) -> BTreeMap<&String, &Package> {
+        let all_packages = self.packages_to_build(target);
+        all_packages
+            .into_iter()
+            .filter(|(_, pkg)| match pkg.output {
+                PackageOutput::Zone { intermediate_only } => !intermediate_only,
+                PackageOutput::Tarball => true,
+            })
+            .collect()
+    }
 }
 
 /// Errors which may be returned when parsing the server configuration.

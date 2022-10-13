@@ -1,5 +1,6 @@
 [package.my-package]
 service_name = "my-service"
-rust.binary_names = ["test-service"]
-rust.release = false
-zone = false
+source.type = "local"
+source.rust.binary_names = ["test-service"]
+source.rust.release = false
+output.type = "tarball"
