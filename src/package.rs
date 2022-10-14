@@ -7,6 +7,8 @@
 use crate::blob::BLOB;
 use crate::progress::{NoProgress, Progress};
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
+use flate2::write::GzEncoder;
 use serde_derive::Deserialize;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
@@ -14,6 +16,36 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use tar::Builder;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+#[async_trait]
+trait AsyncAppendFile {
+    async fn append_file_async<P>(&mut self, path: P, file: &mut File) -> std::io::Result<()>
+    where
+        P: AsRef<Path> + Send;
+
+    async fn append_path_with_name_async<P, N>(&mut self, path: P, name: N) -> std::io::Result<()>
+    where
+        P: AsRef<Path> + Send,
+        N: AsRef<Path> + Send;
+}
+
+#[async_trait]
+impl<W: std::io::Write + Send> AsyncAppendFile for Builder<W> {
+    async fn append_file_async<P>(&mut self, path: P, file: &mut File) -> std::io::Result<()>
+    where
+        P: AsRef<Path> + Send,
+    {
+        tokio::task::block_in_place(move || self.append_file(path, file))
+    }
+
+    async fn append_path_with_name_async<P, N>(&mut self, path: P, name: N) -> std::io::Result<()>
+    where
+        P: AsRef<Path> + Send,
+        N: AsRef<Path> + Send,
+    {
+        tokio::task::block_in_place(move || self.append_path_with_name(path, name))
+    }
+}
 
 // Helper to open a tarfile for reading/writing.
 fn create_tarfile<P: AsRef<Path> + std::fmt::Debug>(tarfile: P) -> Result<File> {
@@ -122,6 +154,27 @@ pub enum PackageSource {
     Manual,
 }
 
+impl PackageSource {
+    fn rust_package(&self) -> Option<&RustPackage> {
+        match self {
+            PackageSource::Local {
+                rust: Some(rust_pkg),
+                ..
+            } => Some(rust_pkg),
+            _ => None,
+        }
+    }
+
+    fn blobs(&self) -> Option<&[PathBuf]> {
+        match self {
+            PackageSource::Local {
+                blobs: Some(blobs), ..
+            } => Some(blobs),
+            _ => None,
+        }
+    }
+}
+
 /// Describes the output format of the package.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -167,14 +220,14 @@ pub struct Package {
 async fn new_zone_archive_builder(
     package_name: &str,
     output_directory: &Path,
-) -> Result<tar::Builder<flate2::write::GzEncoder<std::fs::File>>> {
+) -> Result<tar::Builder<GzEncoder<File>>> {
     let tarfile = output_directory.join(format!("{}.tar.gz", package_name));
     let file = create_tarfile(tarfile)?;
     // TODO: Consider using async compression, async tar.
     // It's not the *worst* thing in the world for a packaging tool to block
     // here, but it would help the other async threads remain responsive if
     // we avoided blocking.
-    let gzw = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+    let gzw = GzEncoder::new(file, flate2::Compression::fast());
     let mut archive = Builder::new(gzw);
     archive.mode(tar::HeaderMode::Deterministic);
 
@@ -186,7 +239,9 @@ async fn new_zone_archive_builder(
     let contents = r#"{"v":"1","t":"layer"}"#;
     root_json.write_all(contents.as_bytes()).await?;
     root_json.seek(std::io::SeekFrom::Start(0)).await?;
-    archive.append_file("oxide.json", &mut root_json.into_std().await)?;
+    archive
+        .append_file_async(&Path::new("oxide.json"), &mut root_json.into_std().await)
+        .await?;
 
     Ok(archive)
 }
@@ -278,17 +333,6 @@ impl Package {
         archive: &mut Builder<W>,
         paths: &Vec<MappedPath>,
     ) -> Result<()> {
-        tokio::task::block_in_place(move || self.add_paths_sync(progress, archive, paths))?;
-        Ok(())
-    }
-
-    // Add mapped paths to the package.
-    fn add_paths_sync<W: std::io::Write>(
-        &self,
-        progress: &impl Progress,
-        archive: &mut Builder<W>,
-        paths: &Vec<MappedPath>,
-    ) -> Result<()> {
         progress.set_message("adding paths");
 
         for path in paths {
@@ -339,7 +383,8 @@ impl Package {
                     archive.append_dir(&dst, ".")?;
                 } else if entry.file_type().is_file() {
                     archive
-                        .append_path_with_name(entry.path(), &dst)
+                        .append_path_with_name_async(entry.path(), &dst)
+                        .await
                         .context(format!(
                             "Failed to add file '{}' to '{}'",
                             entry.path().display(),
@@ -358,29 +403,23 @@ impl Package {
         Ok(())
     }
 
-    async fn add_rust<W: std::io::Write>(
+    async fn add_rust<W: std::io::Write + Send>(
         &self,
         progress: &impl Progress,
         archive: &mut Builder<W>,
     ) -> Result<()> {
-        match &self.source {
-            PackageSource::Local {
-                rust: Some(rust_pkg),
-                ..
-            } => {
-                progress.set_message("adding rust binaries");
-                let dst = match self.output {
-                    PackageOutput::Zone { .. } => {
-                        let dst = Path::new("/opt/oxide").join(&self.service_name).join("bin");
-                        add_directory_and_parents(archive, &dst)?;
-                        archive_path(&dst)?
-                    }
-                    PackageOutput::Tarball => PathBuf::from(""),
-                };
-                rust_pkg.add_binaries_to_archive(archive, &dst)?;
-                progress.increment(1);
-            }
-            _ => {}
+        if let Some(rust_pkg) = self.source.rust_package() {
+            progress.set_message("adding rust binaries");
+            let dst = match self.output {
+                PackageOutput::Zone { .. } => {
+                    let dst = Path::new("/opt/oxide").join(&self.service_name).join("bin");
+                    add_directory_and_parents(archive, &dst)?;
+                    archive_path(&dst)?
+                }
+                PackageOutput::Tarball => PathBuf::from(""),
+            };
+            rust_pkg.add_binaries_to_archive(archive, &dst).await?;
+            progress.increment(1);
         }
         Ok(())
     }
@@ -400,20 +439,15 @@ impl Package {
         destination_path: &Path,
     ) -> Result<()> {
         progress.set_message("adding blobs");
-        match &self.source {
-            PackageSource::Local {
-                blobs: Some(blobs), ..
-            } => {
-                let blobs_path = download_directory.join(&self.service_name);
-                std::fs::create_dir_all(&blobs_path)?;
-                for blob in blobs {
-                    let blob_path = blobs_path.join(blob);
-                    crate::blob::download(&blob.to_string_lossy(), &blob_path).await?;
-                    progress.increment(1);
-                }
-                archive.append_dir_all(&destination_path, &blobs_path)?;
+        if let Some(blobs) = self.source.blobs() {
+            let blobs_path = download_directory.join(&self.service_name);
+            std::fs::create_dir_all(&blobs_path)?;
+            for blob in blobs {
+                let blob_path = blobs_path.join(blob);
+                crate::blob::download(&blob.to_string_lossy(), &blob_path).await?;
+                progress.increment(1);
             }
-            _ => (),
+            archive.append_dir_all(&destination_path, &blobs_path)?;
         }
         Ok(())
     }
@@ -450,7 +484,10 @@ impl Package {
                 let tmp = tempfile::tempdir()?;
                 for component_package in packages {
                     let component_path = output_directory.join(component_package);
-                    let gzr = flate2::read::GzDecoder::new(open_tarfile(component_path)?);
+                    let gzr = flate2::read::GzDecoder::new(open_tarfile(&component_path)?);
+                    if gzr.header().is_none() {
+                        return Err(anyhow!("Missing gzip header from {}. Note that composite packages can currently only consist of zone images", component_path.display()));
+                    }
                     let mut component_reader = tar::Archive::new(gzr);
                     let entries = component_reader.entries()?;
 
@@ -459,16 +496,19 @@ impl Package {
                         let mut entry = entry?;
 
                         // Ignore the JSON header files
-                        if entry.path()? == Path::new("oxide.json") {
+                        let entry_path = entry.path()?;
+                        if entry_path == Path::new("oxide.json") {
                             continue;
                         }
 
-                        let entry_unpack_path =
-                            tmp.path().join(entry.path()?.strip_prefix("root/")?);
+                        let entry_unpack_path = tmp.path().join(entry_path.strip_prefix("root/")?);
                         entry.unpack(&entry_unpack_path)?;
+                        let entry_path = entry.path()?;
                         assert!(entry_unpack_path.exists());
 
-                        archive.append_path_with_name(entry_unpack_path, entry.path()?)?;
+                        archive
+                            .append_path_with_name_async(entry_unpack_path, entry_path)
+                            .await?;
                     }
                 }
             }
@@ -539,17 +579,18 @@ impl RustPackage {
     //
     // - `archive`: The archive to which the binary should be added
     // - `dst_directory`: The path where the binary should be added in the archive
-    fn add_binaries_to_archive<W: std::io::Write>(
+    async fn add_binaries_to_archive<W: std::io::Write + Send>(
         &self,
         archive: &mut tar::Builder<W>,
         dst_directory: &Path,
     ) -> Result<()> {
         for name in &self.binary_names {
             archive
-                .append_path_with_name(
+                .append_path_with_name_async(
                     Self::local_binary_path(&name, self.release),
                     dst_directory.join(&name),
                 )
+                .await
                 .map_err(|err| anyhow!("Cannot append binary to tarfile: {}", err))?;
         }
         Ok(())
