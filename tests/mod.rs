@@ -11,7 +11,7 @@ mod test {
     use std::path::{Path, PathBuf};
     use tar::Archive;
 
-    use omicron_zone_package::package::download;
+    use omicron_zone_package::blob::download;
 
     fn get_next<'a, R: 'a + Read>(entries: &mut tar::Entries<'a, R>) -> PathBuf {
         entries
@@ -24,7 +24,7 @@ mod test {
     }
 
     // Tests a package of arbitrary files is being placed into a Zone image
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_package_as_zone() {
         // Parse the configuration
         let cfg = config::parse("tests/service-a/cfg.toml").unwrap();
@@ -62,7 +62,7 @@ mod test {
     }
 
     // Tests a rust package being placed into a Zone image
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_rust_package_as_zone() {
         // Parse the configuration
         let cfg = config::parse("tests/service-b/cfg.toml").unwrap();
@@ -107,7 +107,7 @@ mod test {
     //
     // This is used for building packages that exist in the Global Zone,
     // and don't need (nor want) to be packaged into a full Zone image.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_rust_package_as_tarball() {
         // Parse the configuration
         let cfg = config::parse("tests/service-c/cfg.toml").unwrap();
@@ -130,13 +130,15 @@ mod test {
     // Although package and service names are often the same, they do
     // not *need* to be the same. This is an example of them both
     // being explicitly different.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_rust_package_with_disinct_service_name() {
         // Parse the configuration
         let cfg = config::parse("tests/service-d/cfg.toml").unwrap();
         let package_name = "my-package";
         let service_name = "my-service";
         let package = cfg.packages.get(package_name).unwrap();
+
+        assert_eq!(package.service_name, service_name);
 
         // Create the packaged file
         let out = tempfile::tempdir().unwrap();
@@ -151,7 +153,59 @@ mod test {
         assert!(ents.next().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_composite_package() {
+        // Parse the configuration
+        let cfg = config::parse("tests/service-e/cfg.toml").unwrap();
+        let out = tempfile::tempdir().unwrap();
+
+        // Build the dependencies first.
+        let package_dependencies = ["pkg-1", "pkg-2"];
+        for package_name in package_dependencies {
+            let package = cfg.packages.get(package_name).unwrap();
+            // Create the packaged file
+            package.create(package_name, out.path()).await.unwrap();
+        }
+
+        // Build the composite package
+        let package_name = "pkg-3";
+        let package = cfg.packages.get(package_name).unwrap();
+        package.create(package_name, out.path()).await.unwrap();
+
+        // Verify the contents
+        let path = package.get_output_path(package_name, &out.path());
+        assert!(path.exists());
+        let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
+        let mut archive = Archive::new(gzr);
+        let mut ents = archive.entries().unwrap();
+        assert_eq!(Path::new("oxide.json"), get_next(&mut ents));
+        assert_eq!(Path::new("root/"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
+        assert_eq!(
+            Path::new("root/opt/oxide/pkg-1-file.txt"),
+            get_next(&mut ents)
+        );
+        assert_eq!(Path::new("root/"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
+        assert_eq!(
+            Path::new("root/opt/oxide/pkg-2-file.txt"),
+            get_next(&mut ents)
+        );
+        assert_eq!(Path::new("root/"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide/svc-2"), get_next(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide/svc-2/bin"), get_next(&mut ents));
+        assert_eq!(
+            Path::new("root/opt/oxide/svc-2/bin/test-service"),
+            get_next(&mut ents)
+        );
+        assert!(ents.next().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_download() -> Result<()> {
         let out = tempfile::tempdir()?;
 

@@ -1,0 +1,21 @@
+[package.pkg-1]
+service_name = "svc-1"
+source.type = "local"
+source.paths = [ { from = "tests/service-e/pkg-1-file.txt", to = "/opt/oxide/pkg-1-file.txt" } ]
+output.type = "zone"
+output.intermediate_only = true
+
+[package.pkg-2]
+service_name = "svc-2"
+source.type = "local"
+source.rust.binary_names = ["test-service"]
+source.rust.release = false
+source.paths = [ { from = "tests/service-e/pkg-2-file.txt", to = "/opt/oxide/pkg-2-file.txt" } ]
+output.type = "zone"
+output.intermediate_only = true
+
+[package.pkg-3]
+service_name = "my-service"
+source.type = "composite"
+source.packages = [ "pkg-1.tar.gz", "pkg-2.tar.gz" ]
+output.type = "zone"

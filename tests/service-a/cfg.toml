@@ -1,10 +1,8 @@
 [package.my-service]
 service_name = "my-service"
-zone = true
-
-[[package.my-service.paths]]
-from = "tests/service-a/subdirectory"
-to = "/opt/oxide/my-service"
-[[package.my-service.paths]]
-from = "tests/service-a/single-file.txt"
-to = "/opt/oxide/my-service/single-file.txt"
+source.type = "local"
+source.paths = [
+  { from = "tests/service-a/subdirectory", to = "/opt/oxide/my-service" },
+  { from = "tests/service-a/single-file.txt", to = "/opt/oxide/my-service/single-file.txt" }
+]
+output.type = "zone"
