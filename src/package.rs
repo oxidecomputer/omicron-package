@@ -123,7 +123,7 @@ fn add_directory_and_parents<W: std::io::Write>(
     }
 
     for parent in parents {
-        let dst = archive_path(&parent)?;
+        let dst = archive_path(parent)?;
         archive.append_dir(&dst, ".")?;
     }
 
@@ -478,7 +478,7 @@ impl Package {
         match &self.source {
             PackageSource::Local { paths, .. } => {
                 // Add mapped paths.
-                self.add_paths(progress, &mut archive, &paths).await?;
+                self.add_paths(progress, &mut archive, paths).await?;
 
                 // Attempt to add the rust binary, if one was built.
                 self.add_rust(progress, &mut archive).await?;
@@ -565,14 +565,14 @@ impl Package {
                 self.add_rust(progress, &mut archive).await?;
 
                 // Add (and possibly download) blobs
-                self.add_blobs(progress, &mut archive, output_directory, &Path::new(BLOB))
+                self.add_blobs(progress, &mut archive, output_directory, Path::new(BLOB))
                     .await?;
 
                 Ok(archive
                     .into_inner()
                     .map_err(|err| anyhow!("Failed to finalize archive: {}", err))?)
             }
-            _ => return Err(anyhow!("Cannot create non-local tarball")),
+            _ => Err(anyhow!("Cannot create non-local tarball")),
         }
     }
 }
@@ -602,7 +602,7 @@ impl RustPackage {
         for name in &self.binary_names {
             archive
                 .append_path_with_name_async(
-                    Self::local_binary_path(&name, self.release),
+                    Self::local_binary_path(name, self.release),
                     dst_directory.join(&name),
                 )
                 .await
