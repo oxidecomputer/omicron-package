@@ -27,6 +27,11 @@ trait AsyncAppendFile {
     where
         P: AsRef<Path> + Send,
         N: AsRef<Path> + Send;
+
+    async fn append_dir_all_async<P, Q>(&mut self, path: P, src_path: Q) -> std::io::Result<()>
+    where
+        P: AsRef<Path> + Send,
+        Q: AsRef<Path> + Send;
 }
 
 #[async_trait]
@@ -44,6 +49,14 @@ impl<W: std::io::Write + Send> AsyncAppendFile for Builder<W> {
         N: AsRef<Path> + Send,
     {
         tokio::task::block_in_place(move || self.append_path_with_name(path, name))
+    }
+
+    async fn append_dir_all_async<P, Q>(&mut self, path: P, src_path: Q) -> std::io::Result<()>
+    where
+        P: AsRef<Path> + Send,
+        Q: AsRef<Path> + Send,
+    {
+        tokio::task::block_in_place(move || self.append_dir_all(path, src_path))
     }
 }
 
@@ -431,7 +444,7 @@ impl Package {
     // - `package`: The package being constructed
     // - `download_directory`: The location to which the blobs should be downloaded
     // - `destination_path`: The destination path of the blobs within the archive
-    async fn add_blobs<W: std::io::Write>(
+    async fn add_blobs<W: std::io::Write + Send>(
         &self,
         progress: &impl Progress,
         archive: &mut Builder<W>,
@@ -447,7 +460,9 @@ impl Package {
                 crate::blob::download(&blob.to_string_lossy(), &blob_path).await?;
                 progress.increment(1);
             }
-            archive.append_dir_all(&destination_path, &blobs_path)?;
+            archive
+                .append_dir_all_async(&destination_path, &blobs_path)
+                .await?;
         }
         Ok(())
     }
