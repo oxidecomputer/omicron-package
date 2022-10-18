@@ -24,7 +24,7 @@ impl Config {
     pub fn packages_to_build(&self, target: &Target) -> BTreeMap<&String, &Package> {
         self.packages
             .iter()
-            .filter(|(_, pkg)| target.includes_package(&pkg))
+            .filter(|(_, pkg)| target.includes_package(pkg))
             .map(|(name, pkg)| (name, pkg))
             .collect()
     }
@@ -51,9 +51,13 @@ pub enum ParseError {
     Io(#[from] std::io::Error),
 }
 
+/// Parses a manifest into a package [`Config`].
+pub fn parse_manifest(manifest: &str) -> Result<Config, ParseError> {
+    let cfg = toml::from_str::<Config>(manifest)?;
+    Ok(cfg)
+}
 /// Parses a path in the filesystem into a package [`Config`].
 pub fn parse<P: AsRef<Path>>(path: P) -> Result<Config, ParseError> {
     let contents = std::fs::read_to_string(path.as_ref())?;
-    let cfg = toml::from_str::<Config>(&contents)?;
-    Ok(cfg)
+    parse_manifest(&contents)
 }

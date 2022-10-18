@@ -35,7 +35,7 @@ impl Target {
                 return false;
             };
         }
-        return true;
+        true
     }
 }
 
