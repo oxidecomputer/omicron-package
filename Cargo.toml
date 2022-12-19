@@ -20,5 +20,5 @@ tar = "0.4"
 tempfile = "3.3"
 thiserror = "1.0"
 tokio = { version = "1.19", features = [ "full" ] }
-toml = "0.5.9"
+toml = "0.5.10"
 walkdir = "2.3"
