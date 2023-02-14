@@ -451,15 +451,15 @@ impl Package {
         download_directory: &Path,
         destination_path: &Path,
     ) -> Result<()> {
-        progress.set_message("adding blobs".into());
         if let Some(blobs) = self.source.blobs() {
             let blobs_path = download_directory.join(&self.service_name);
             std::fs::create_dir_all(&blobs_path)?;
             for blob in blobs {
                 let blob_path = blobs_path.join(blob);
-                crate::blob::download(&blob.to_string_lossy(), &blob_path).await?;
+                crate::blob::download(progress, &blob.to_string_lossy(), &blob_path).await?;
                 progress.increment(1);
             }
+            progress.set_message("adding blobs".into());
             archive
                 .append_dir_all_async(&destination_path, &blobs_path)
                 .await?;
