@@ -4,11 +4,12 @@
 
 //! Utility for bundling target binaries as tarfiles.
 
-use crate::blob::BLOB;
+use crate::blob::{self, BLOB};
 use crate::progress::{NoProgress, Progress};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use flate2::write::GzEncoder;
+use futures_util::{stream, StreamExt, TryStreamExt};
 use serde_derive::Deserialize;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
@@ -452,13 +453,24 @@ impl Package {
         destination_path: &Path,
     ) -> Result<()> {
         if let Some(blobs) = self.source.blobs() {
+            progress.set_message("downloading blobs".into());
             let blobs_path = download_directory.join(&self.service_name);
             std::fs::create_dir_all(&blobs_path)?;
-            for blob in blobs {
-                let blob_path = blobs_path.join(blob);
-                crate::blob::download(progress, &blob.to_string_lossy(), &blob_path).await?;
-                progress.increment(1);
-            }
+            stream::iter(blobs.iter())
+                .map(Ok)
+                .try_for_each_concurrent(None, |blob| {
+                    let blob_path = blobs_path.join(blob);
+                    async move {
+                        blob::download(progress, &blob.to_string_lossy(), &blob_path)
+                            .await
+                            .with_context(|| {
+                                format!("failed to download blob: {}", blob.to_string_lossy())
+                            })?;
+                        progress.increment(1);
+                        Ok::<_, anyhow::Error>(())
+                    }
+                })
+                .await?;
             progress.set_message("adding blobs".into());
             archive
                 .append_dir_all_async(&destination_path, &blobs_path)
