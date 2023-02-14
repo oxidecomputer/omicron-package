@@ -6,10 +6,13 @@
 
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, FixedOffset, Utc};
+use futures_util::StreamExt;
 use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
 use std::path::Path;
 use std::str::FromStr;
 use tokio::io::AsyncWriteExt;
+
+use crate::progress::Progress;
 
 // Path to the blob S3 Bucket.
 const S3_BUCKET: &str = "https://oxide-omicron-build.s3.amazonaws.com";
@@ -17,27 +20,34 @@ const S3_BUCKET: &str = "https://oxide-omicron-build.s3.amazonaws.com";
 pub(crate) const BLOB: &str = "blob";
 
 // Downloads "source" from S3_BUCKET to "destination".
-pub async fn download(source: &str, destination: &Path) -> Result<()> {
+pub async fn download(progress: &impl Progress, source: &str, destination: &Path) -> Result<()> {
+    let blob = destination
+        .file_name()
+        .ok_or_else(|| anyhow!("missing blob filename"))?;
+
+    progress.set_message(format!("adding blob: {}", blob.to_string_lossy()).into());
+
     let url = format!("{}/{}", S3_BUCKET, source);
     let client = reqwest::Client::new();
+
+    let head_response = client.head(&url).send().await?;
+    if !head_response.status().is_success() {
+        bail!("head failed! {:?}", head_response);
+    }
+
+    let headers = head_response.headers();
+
+    // From S3, header looks like:
+    //
+    //    "Content-Length: 49283072"
+    let content_length = headers
+        .get(CONTENT_LENGTH)
+        .ok_or_else(|| anyhow!("no content length on {} HEAD response!", url))?;
+    let content_length: u64 = u64::from_str(content_length.to_str()?)?;
 
     if destination.exists() {
         // If destination exists, check against size and last modified time. If
         // both are the same, then return Ok
-        let head_response = client.head(&url).send().await?;
-        if !head_response.status().is_success() {
-            bail!("head failed! {:?}", head_response);
-        }
-
-        let headers = head_response.headers();
-
-        // From S3, header looks like:
-        //
-        //    "Content-Length: 49283072"
-        let content_length = headers
-            .get(CONTENT_LENGTH)
-            .ok_or_else(|| anyhow!("no content length on {} HEAD response!", url))?;
-        let content_length: u64 = u64::from_str(content_length.to_str()?)?;
 
         // From S3, header looks like:
         //
@@ -55,12 +65,6 @@ pub async fn download(source: &str, destination: &Path) -> Result<()> {
         }
     }
 
-    println!(
-        "Downloading {} to {}",
-        source,
-        destination.to_string_lossy()
-    );
-
     let response = client.get(url).send().await?;
 
     // Store modified time from HTTPS response
@@ -73,7 +77,20 @@ pub async fn download(source: &str, destination: &Path) -> Result<()> {
 
     // Write file bytes to destination
     let mut file = tokio::fs::File::create(destination).await?;
-    file.write_all(&response.bytes().await?).await?;
+
+    // Create a sub-progress for the blob download
+    let blob_progress = progress.sub_progress(content_length);
+    blob_progress.set_message(format!("downloading {}", blob.to_string_lossy()).into());
+
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        file.write_all(&chunk).await?;
+        blob_progress.increment(chunk.len() as u64);
+    }
+    drop(blob_progress);
+
+    // Flush file to disk
     drop(file);
 
     // Set destination file's modified time based on HTTPS response

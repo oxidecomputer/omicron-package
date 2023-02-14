@@ -261,9 +261,13 @@ async fn new_zone_archive_builder(
 
 impl Package {
     pub fn get_output_path(&self, name: &str, output_directory: &Path) -> PathBuf {
+        output_directory.join(self.get_output_file(name))
+    }
+
+    pub fn get_output_file(&self, name: &str) -> String {
         match self.output {
-            PackageOutput::Zone { .. } => output_directory.join(format!("{}.tar.gz", name)),
-            PackageOutput::Tarball => output_directory.join(format!("{}.tar", name)),
+            PackageOutput::Zone { .. } => format!("{}.tar.gz", name),
+            PackageOutput::Tarball => format!("{}.tar", name),
         }
     }
 
@@ -282,17 +286,13 @@ impl Package {
         // Tally up some information so we can report progress:
         //
         // - 1 tick for each included path
-        // - 1 tick for the rust binary
-        // - 1 tick per blob
+        // - 1 tick per rust binary
+        // - 1 tick per blob + 1 tick for appending blob dir to archive
         let progress_total = match &self.source {
             PackageSource::Local { blobs, rust, paths } => {
-                let blob_work = if let Some(blobs) = blobs {
-                    blobs.len()
-                } else {
-                    0
-                };
+                let blob_work = blobs.as_ref().map(|b| b.len() + 1).unwrap_or(0);
 
-                let rust_work = if rust.is_some() { 1 } else { 0 };
+                let rust_work = rust.as_ref().map(|r| r.binary_names.len()).unwrap_or(0);
 
                 let paths_work = paths
                     .iter()
@@ -346,7 +346,7 @@ impl Package {
         archive: &mut Builder<W>,
         paths: &Vec<MappedPath>,
     ) -> Result<()> {
-        progress.set_message("adding paths");
+        progress.set_message("adding paths".into());
 
         for path in paths {
             match self.output {
@@ -422,7 +422,6 @@ impl Package {
         archive: &mut Builder<W>,
     ) -> Result<()> {
         if let Some(rust_pkg) = self.source.rust_package() {
-            progress.set_message("adding rust binaries");
             let dst = match self.output {
                 PackageOutput::Zone { .. } => {
                     let dst = Path::new("/opt/oxide").join(&self.service_name).join("bin");
@@ -431,8 +430,9 @@ impl Package {
                 }
                 PackageOutput::Tarball => PathBuf::from(""),
             };
-            rust_pkg.add_binaries_to_archive(archive, &dst).await?;
-            progress.increment(1);
+            rust_pkg
+                .add_binaries_to_archive(progress, archive, &dst)
+                .await?;
         }
         Ok(())
     }
@@ -451,18 +451,19 @@ impl Package {
         download_directory: &Path,
         destination_path: &Path,
     ) -> Result<()> {
-        progress.set_message("adding blobs");
         if let Some(blobs) = self.source.blobs() {
             let blobs_path = download_directory.join(&self.service_name);
             std::fs::create_dir_all(&blobs_path)?;
             for blob in blobs {
                 let blob_path = blobs_path.join(blob);
-                crate::blob::download(&blob.to_string_lossy(), &blob_path).await?;
+                crate::blob::download(progress, &blob.to_string_lossy(), &blob_path).await?;
                 progress.increment(1);
             }
+            progress.set_message("adding blobs".into());
             archive
                 .append_dir_all_async(&destination_path, &blobs_path)
                 .await?;
+            progress.increment(1);
         }
         Ok(())
     }
@@ -596,10 +597,12 @@ impl RustPackage {
     // - `dst_directory`: The path where the binary should be added in the archive
     async fn add_binaries_to_archive<W: std::io::Write + Send>(
         &self,
+        progress: &impl Progress,
         archive: &mut tar::Builder<W>,
         dst_directory: &Path,
     ) -> Result<()> {
         for name in &self.binary_names {
+            progress.set_message(format!("adding rust binary: {name}").into());
             archive
                 .append_path_with_name_async(
                     Self::local_binary_path(name, self.release),
@@ -607,6 +610,7 @@ impl RustPackage {
                 )
                 .await
                 .map_err(|err| anyhow!("Cannot append binary to tarfile: {}", err))?;
+            progress.increment(1);
         }
         Ok(())
     }
