@@ -261,9 +261,13 @@ async fn new_zone_archive_builder(
 
 impl Package {
     pub fn get_output_path(&self, name: &str, output_directory: &Path) -> PathBuf {
+        output_directory.join(self.get_output_file(name))
+    }
+
+    pub fn get_output_file(&self, name: &str) -> String {
         match self.output {
-            PackageOutput::Zone { .. } => output_directory.join(format!("{}.tar.gz", name)),
-            PackageOutput::Tarball => output_directory.join(format!("{}.tar", name)),
+            PackageOutput::Zone { .. } => format!("{}.tar.gz", name),
+            PackageOutput::Tarball => format!("{}.tar", name),
         }
     }
 
