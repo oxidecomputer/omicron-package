@@ -25,8 +25,6 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
         .file_name()
         .ok_or_else(|| anyhow!("missing blob filename"))?;
 
-    progress.set_message(format!("adding blob: {}", blob.to_string_lossy()).into());
-
     let url = format!("{}/{}", S3_BUCKET, source);
     let client = reqwest::Client::new();
 
@@ -80,7 +78,7 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
 
     // Create a sub-progress for the blob download
     let blob_progress = progress.sub_progress(content_length);
-    blob_progress.set_message(format!("downloading {}", blob.to_string_lossy()).into());
+    blob_progress.set_message(blob.to_string_lossy().into_owned().into());
 
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
