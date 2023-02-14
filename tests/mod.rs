@@ -12,6 +12,7 @@ mod test {
     use tar::Archive;
 
     use omicron_zone_package::blob::download;
+    use omicron_zone_package::progress::NoProgress;
 
     fn get_next<'a, R: 'a + Read>(entries: &mut tar::Entries<'a, R>) -> PathBuf {
         entries
@@ -212,8 +213,8 @@ mod test {
         let url = "OVMF_CODE.fd";
         let dst = out.path().join(url);
 
-        download(&url, &dst).await?;
-        download(&url, &dst).await?;
+        download(&NoProgress, &url, &dst).await?;
+        download(&NoProgress, &url, &dst).await?;
 
         Ok(())
     }
