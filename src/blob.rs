@@ -90,7 +90,17 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
     }
     drop(blob_progress);
 
-    // Flush file to disk
+    // tokio performs async file I/O via thread pools in the background
+    // and so just completing the `write_all` futures and dropping the
+    // file here is not necessarily enough to ensure the blob has been
+    // written out to the filesystem. This unfortunately can cause a race
+    // condition as `tar-rs` will read the file metadata to write out the
+    // tar Header and then subsequently read the file itself to write to
+    // the archive. This can cause us to create a corrupted archive if the
+    // file content size does not match the header size from the metadata.
+    // All this to say we need to explicitly sync here before returning
+    // and trying to add the blob to the archive.
+    file.sync_all().await?;
     drop(file);
 
     // Set destination file's modified time based on HTTPS response
