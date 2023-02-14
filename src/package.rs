@@ -346,7 +346,7 @@ impl Package {
         archive: &mut Builder<W>,
         paths: &Vec<MappedPath>,
     ) -> Result<()> {
-        progress.set_message("adding paths");
+        progress.set_message("adding paths".into());
 
         for path in paths {
             match self.output {
@@ -451,7 +451,7 @@ impl Package {
         download_directory: &Path,
         destination_path: &Path,
     ) -> Result<()> {
-        progress.set_message("adding blobs");
+        progress.set_message("adding blobs".into());
         if let Some(blobs) = self.source.blobs() {
             let blobs_path = download_directory.join(&self.service_name);
             std::fs::create_dir_all(&blobs_path)?;
@@ -602,7 +602,7 @@ impl RustPackage {
         dst_directory: &Path,
     ) -> Result<()> {
         for name in &self.binary_names {
-            progress.set_message(format!("adding rust binary: {name}"));
+            progress.set_message(format!("adding rust binary: {name}").into());
             archive
                 .append_path_with_name_async(
                     Self::local_binary_path(name, self.release),
