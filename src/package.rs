@@ -131,6 +131,45 @@ fn add_directory_and_parents<W: std::io::Write>(
     Ok(())
 }
 
+// Adds a package at `package_path` to a new zone image
+// being built using the `archive` builder.
+async fn add_package_to_zone_archive(
+    archive: &mut tar::Builder<GzEncoder<File>>,
+    package_path: &Path,
+) -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let gzr = flate2::read::GzDecoder::new(open_tarfile(&package_path)?);
+    if gzr.header().is_none() {
+        return Err(anyhow!(
+            "Missing gzip header from {} - cannot add it to zone image",
+            package_path.display()
+        ));
+    }
+    let mut component_reader = tar::Archive::new(gzr);
+    let entries = component_reader.entries()?;
+
+    // First, unpack the existing entries
+    for entry in entries {
+        let mut entry = entry?;
+
+        // Ignore the JSON header files
+        let entry_path = entry.path()?;
+        if entry_path == Path::new("oxide.json") {
+            continue;
+        }
+
+        let entry_unpack_path = tmp.path().join(entry_path.strip_prefix("root/")?);
+        entry.unpack(&entry_unpack_path)?;
+        let entry_path = entry.path()?;
+        assert!(entry_unpack_path.exists());
+
+        archive
+            .append_path_with_name_async(entry_unpack_path, entry_path)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Describes the origin of an externally-built package.
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -261,10 +300,19 @@ async fn new_zone_archive_builder(
 }
 
 impl Package {
+    /// The path of a package once it is built.
     pub fn get_output_path(&self, name: &str, output_directory: &Path) -> PathBuf {
         output_directory.join(self.get_output_file(name))
     }
 
+    /// The path of a package after it has been "stamped" with a version.
+    pub fn get_stamped_output_path(&self, name: &str, output_directory: &Path) -> PathBuf {
+        output_directory
+            .join("versioned")
+            .join(self.get_output_file(name))
+    }
+
+    /// The filename of a package once it is built.
     pub fn get_output_file(&self, name: &str) -> String {
         match self.output {
             PackageOutput::Zone { .. } => format!("{}.tar.gz", name),
@@ -276,6 +324,79 @@ impl Package {
     pub async fn create(&self, name: &str, output_directory: &Path) -> Result<File> {
         self.create_internal(&NoProgress, name, output_directory)
             .await
+    }
+
+    pub async fn stamp(
+        &self,
+        name: &str,
+        output_directory: &Path,
+        version: &semver::Version,
+    ) -> Result<PathBuf> {
+        let stamp_path = self.get_stamped_output_path(name, &output_directory);
+        std::fs::create_dir_all(&stamp_path.parent().unwrap())?;
+        let version_filename = Path::new("VERSION");
+
+        match self.output {
+            PackageOutput::Zone { .. } => {
+                let version_path = Path::new("/opt/oxide").join(version_filename);
+                // Add the package to "itself", but as a stamped version.
+                //
+                // We jump through some hoops to avoid modifying the archive
+                // in-place, which would complicate the ordering and determinism
+                // in the build system.
+                let mut archive =
+                    new_zone_archive_builder(name, stamp_path.parent().unwrap()).await?;
+                let package_path = self.get_output_path(name, &output_directory);
+                add_package_to_zone_archive(&mut archive, &package_path).await?;
+
+                // Add the version file to the archive.
+                let mut version_file = tokio::fs::File::from_std(tempfile::tempfile()?);
+                version_file
+                    .write_all(version.to_string().as_bytes())
+                    .await?;
+                version_file.seek(std::io::SeekFrom::Start(0)).await?;
+                archive
+                    .append_file_async(
+                        archive_path(&version_path)?,
+                        &mut version_file.into_std().await,
+                    )
+                    .await?;
+
+                // Finalize the archive.
+                archive
+                    .into_inner()
+                    .map_err(|err| anyhow!("Failed to finalize archive: {}", err))?
+                    .finish()?;
+            }
+            PackageOutput::Tarball => {
+                // Unpack the old tarball
+                let original_file = self.get_output_path(name, output_directory);
+                let mut reader = tar::Archive::new(open_tarfile(&original_file)?);
+                let tmp = tempfile::tempdir()?;
+                reader.unpack(tmp.path())?;
+
+                // Create the new tarball
+                let file = create_tarfile(&stamp_path)?;
+                // TODO: We could add compression here, if we'd like?
+                let mut archive = Builder::new(file);
+                archive.mode(tar::HeaderMode::Deterministic);
+                archive.append_dir_all_async(".", tmp.path()).await?;
+
+                // Add the version file to the archive
+                let mut version_file = tokio::fs::File::from_std(tempfile::tempfile()?);
+                version_file
+                    .write_all(version.to_string().as_bytes())
+                    .await?;
+                version_file.seek(std::io::SeekFrom::Start(0)).await?;
+                archive
+                    .append_file_async(version_filename, &mut version_file.into_std().await)
+                    .await?;
+
+                // Finalize the archive.
+                archive.finish()?;
+            }
+        }
+        Ok(stamp_path.into())
     }
 
     /// Returns the "total number of things to be done" when constructing a
@@ -509,35 +630,9 @@ impl Package {
             PackageSource::Composite { packages } => {
                 // For each of the component packages, open the tarfile, and add
                 // it to our top-level archive.
-                let tmp = tempfile::tempdir()?;
                 for component_package in packages {
                     let component_path = output_directory.join(component_package);
-                    let gzr = flate2::read::GzDecoder::new(open_tarfile(&component_path)?);
-                    if gzr.header().is_none() {
-                        return Err(anyhow!("Missing gzip header from {}. Note that composite packages can currently only consist of zone images", component_path.display()));
-                    }
-                    let mut component_reader = tar::Archive::new(gzr);
-                    let entries = component_reader.entries()?;
-
-                    // First, unpack the existing entries
-                    for entry in entries {
-                        let mut entry = entry?;
-
-                        // Ignore the JSON header files
-                        let entry_path = entry.path()?;
-                        if entry_path == Path::new("oxide.json") {
-                            continue;
-                        }
-
-                        let entry_unpack_path = tmp.path().join(entry_path.strip_prefix("root/")?);
-                        entry.unpack(&entry_unpack_path)?;
-                        let entry_path = entry.path()?;
-                        assert!(entry_unpack_path.exists());
-
-                        archive
-                            .append_path_with_name_async(entry_unpack_path, entry_path)
-                            .await?;
-                    }
+                    add_package_to_zone_archive(&mut archive, &component_path).await?;
                 }
             }
             _ => {
