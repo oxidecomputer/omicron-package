@@ -273,6 +273,7 @@ pub struct Package {
 async fn new_zone_archive_builder(
     package_name: &str,
     output_directory: &Path,
+    version: Option<&semver::Version>,
 ) -> Result<tar::Builder<GzEncoder<File>>> {
     let tarfile = output_directory.join(format!("{}.tar.gz", package_name));
     let file = create_tarfile(tarfile)?;
@@ -289,7 +290,26 @@ async fn new_zone_archive_builder(
     //
     // See the OMICRON1(5) man page for more detail.
     let mut root_json = tokio::fs::File::from_std(tempfile::tempfile()?);
-    let contents = r#"{"v":"1","t":"layer"}"#;
+
+    let default_version = semver::Version::new(0, 0, 0);
+    let version = version.unwrap_or_else(|| &default_version);
+    let version = &version.to_string();
+
+    let kvs = vec![
+        ("v", "1"),
+        ("t", "layer"),
+        ("pkg", package_name),
+        ("version", version),
+    ];
+
+    let contents = String::from("{")
+        + &kvs
+            .into_iter()
+            .map(|(k, v)| format!("\"{k}\":\"{v}\""))
+            .collect::<Vec<String>>()
+            .join(",")
+        + "}";
+
     root_json.write_all(contents.as_bytes()).await?;
     root_json.seek(std::io::SeekFrom::Start(0)).await?;
     archive
@@ -345,7 +365,8 @@ impl Package {
                 // in-place, which would complicate the ordering and determinism
                 // in the build system.
                 let mut archive =
-                    new_zone_archive_builder(name, stamp_path.parent().unwrap()).await?;
+                    new_zone_archive_builder(name, stamp_path.parent().unwrap(), Some(version))
+                        .await?;
                 let package_path = self.get_output_path(name, &output_directory);
                 add_package_to_zone_archive(&mut archive, &package_path).await?;
 
@@ -607,7 +628,7 @@ impl Package {
         name: &str,
         output_directory: &Path,
     ) -> Result<File> {
-        let mut archive = new_zone_archive_builder(name, output_directory).await?;
+        let mut archive = new_zone_archive_builder(name, output_directory, None).await?;
 
         match &self.source {
             PackageSource::Local { paths, .. } => {
