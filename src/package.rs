@@ -6,7 +6,9 @@
 
 use crate::blob::{self, BLOB};
 use crate::progress::{NoProgress, Progress};
-use anyhow::{anyhow, Context, Result};
+use crate::target::Target;
+
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use flate2::write::GzEncoder;
 use futures_util::{stream, StreamExt, TryStreamExt};
@@ -273,8 +275,20 @@ impl Package {
     }
 
     /// Constructs the package file in the output directory.
+    #[deprecated(note = "Call Self::create_for_target instead")]
     pub async fn create(&self, name: &str, output_directory: &Path) -> Result<File> {
-        self.create_internal(&NoProgress, name, output_directory)
+        let null_target = Target(BTreeMap::new());
+        self.create_internal(&null_target, &NoProgress, name, output_directory)
+            .await
+    }
+
+    pub async fn create_for_target(
+        &self,
+        target: &Target,
+        name: &str,
+        output_directory: &Path,
+    ) -> Result<File> {
+        self.create_internal(&target, &NoProgress, name, output_directory)
             .await
     }
 
@@ -283,7 +297,18 @@ impl Package {
     ///
     /// This is intentionally vaguely defined, but it intended to
     /// be a rough indication of progress when using [`Self::create_with_progress`].
+    #[deprecated(note = "Call Self::get_total_work_for_target instead")]
     pub fn get_total_work(&self) -> u64 {
+        let null_target = Target(BTreeMap::new());
+        self.get_total_work_for_target(&null_target).unwrap()
+    }
+
+    /// Returns the "total number of things to be done" when constructing a
+    /// package for a particular target.
+    ///
+    /// This is intentionally vaguely defined, but it intended to
+    /// be a rough indication of progress when using [`Self::create_with_progress`].
+    pub fn get_total_work_for_target(&self, target: &Target) -> Result<u64> {
         // Tally up some information so we can report progress:
         //
         // - 1 tick for each included path
@@ -295,21 +320,20 @@ impl Package {
 
                 let rust_work = rust.as_ref().map(|r| r.binary_names.len()).unwrap_or(0);
 
-                let paths_work = paths
-                    .iter()
-                    .map(|path| {
-                        walkdir::WalkDir::new(&path.from)
-                            .follow_links(true)
-                            .into_iter()
-                            .count()
-                    })
-                    .sum::<usize>();
+                let mut paths_work = 0;
+                for path in paths {
+                    let from = PathBuf::from(path.from.interpolate(&target)?);
+                    paths_work += walkdir::WalkDir::new(&from)
+                        .follow_links(true)
+                        .into_iter()
+                        .count();
+                }
 
                 rust_work + blob_work + paths_work
             }
             _ => 1,
         };
-        progress_total.try_into().unwrap()
+        Ok(progress_total.try_into()?)
     }
 
     /// Identical to [`Self::create`], but allows a caller to receive updates
@@ -320,22 +344,25 @@ impl Package {
         name: &str,
         output_directory: &Path,
     ) -> Result<File> {
-        self.create_internal(progress, name, output_directory).await
+        let null_target = Target(BTreeMap::new());
+        self.create_internal(&null_target, progress, name, output_directory)
+            .await
     }
 
     async fn create_internal(
         &self,
+        target: &Target,
         progress: &impl Progress,
         name: &str,
         output_directory: &Path,
     ) -> Result<File> {
         match self.output {
             PackageOutput::Zone { .. } => {
-                self.create_zone_package(progress, name, output_directory)
+                self.create_zone_package(target, progress, name, output_directory)
                     .await
             }
             PackageOutput::Tarball => {
-                self.create_tarball_package(progress, name, output_directory)
+                self.create_tarball_package(target, progress, name, output_directory)
                     .await
             }
         }
@@ -343,6 +370,7 @@ impl Package {
 
     async fn add_paths<W: std::io::Write + Send + Sync>(
         &self,
+        target: &Target,
         progress: &impl Progress,
         archive: &mut Builder<W>,
         paths: &Vec<MappedPath>,
@@ -350,28 +378,31 @@ impl Package {
         progress.set_message("adding paths".into());
 
         for path in paths {
+            let from = PathBuf::from(path.from.interpolate(&target)?);
+            let to = PathBuf::from(path.to.interpolate(&target)?);
+
             match self.output {
                 PackageOutput::Zone { .. } => {
                     // Zone images require all paths to have their parents before
                     // they may be unpacked.
-                    add_directory_and_parents(archive, path.to.parent().unwrap())?;
+                    add_directory_and_parents(archive, to.parent().unwrap())?;
                 }
                 PackageOutput::Tarball => {}
             }
-            if !path.from.exists() {
+            if !from.exists() {
                 // Strictly speaking, this check is redundant, but it provides
                 // a better error message.
                 return Err(anyhow!(
                     "Cannot add path \"{}\" to package \"{}\" because it does not exist",
-                    path.from.to_string_lossy(),
+                    from.to_string_lossy(),
                     self.service_name,
                 ));
             }
 
-            let from_root = std::fs::canonicalize(&path.from).map_err(|e| {
+            let from_root = std::fs::canonicalize(&from).map_err(|e| {
                 anyhow!(
                     "failed to canonicalize \"{}\": {}",
-                    path.from.to_string_lossy(),
+                    from.to_string_lossy(),
                     e
                 )
             })?;
@@ -382,7 +413,7 @@ impl Package {
                 .sort_by_file_name();
             for entry in entries {
                 let entry = entry?;
-                let dst = &path.to.join(entry.path().strip_prefix(&from_root)?);
+                let dst = &to.join(entry.path().strip_prefix(&from_root)?);
 
                 let dst = match self.output {
                     PackageOutput::Zone { .. } => {
@@ -482,6 +513,7 @@ impl Package {
 
     async fn create_zone_package(
         &self,
+        target: &Target,
         progress: &impl Progress,
         name: &str,
         output_directory: &Path,
@@ -491,7 +523,8 @@ impl Package {
         match &self.source {
             PackageSource::Local { paths, .. } => {
                 // Add mapped paths.
-                self.add_paths(progress, &mut archive, paths).await?;
+                self.add_paths(target, progress, &mut archive, paths)
+                    .await?;
 
                 // Attempt to add the rust binary, if one was built.
                 self.add_rust(progress, &mut archive).await?;
@@ -557,6 +590,7 @@ impl Package {
 
     async fn create_tarball_package(
         &self,
+        target: &Target,
         progress: &impl Progress,
         name: &str,
         output_directory: &Path,
@@ -572,7 +606,8 @@ impl Package {
         match &self.source {
             PackageSource::Local { paths, .. } => {
                 // Add mapped paths.
-                self.add_paths(progress, &mut archive, paths).await?;
+                self.add_paths(target, progress, &mut archive, paths)
+                    .await?;
 
                 // Attempt to add the rust binary, if one was built.
                 self.add_rust(progress, &mut archive).await?;
@@ -638,11 +673,144 @@ impl RustPackage {
     }
 }
 
+/// A string which can be modified with key-value pairs.
+#[derive(Deserialize, Debug)]
+pub struct InterpolatedString(String);
+
+impl InterpolatedString {
+    // Interpret the string for the specified target.
+    // Substitutes key/value pairs as necessary.
+    fn interpolate(&self, target: &Target) -> Result<String> {
+        let mut input = self.0.as_str();
+        let mut output = String::new();
+
+        const START_STR: &str = "{{";
+        const END_STR: &str = "}}";
+
+        while let Some(sub_idx) = input.find(START_STR) {
+            output.push_str(&input[..sub_idx]);
+            input = &input[sub_idx + START_STR.len()..];
+
+            let Some(end_idx) = input.find(END_STR) else {
+                bail!("Missing closing '{END_STR}' character in '{}'", self.0);
+            };
+            let key = &input[..end_idx];
+            let Some(value) = target.0.get(key) else {
+                bail!("Key '{key}' not found in target, but required in '{}'", self.0);
+            };
+            output.push_str(&value);
+            input = &input[end_idx + END_STR.len()..];
+        }
+        output.push_str(&input[..]);
+        Ok(output)
+    }
+}
+
 /// A pair of paths, mapping from a directory on the host to the target.
 #[derive(Deserialize, Debug)]
 pub struct MappedPath {
     /// Source path.
-    pub from: PathBuf,
+    pub from: InterpolatedString,
     /// Destination path.
-    pub to: PathBuf,
+    pub to: InterpolatedString,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn interpolate_noop() {
+        let target = Target(BTreeMap::new());
+        let is = InterpolatedString(String::from("nothing to change"));
+
+        let s = is.interpolate(&target).unwrap();
+        assert_eq!(s, is.0);
+    }
+
+    #[test]
+    fn interpolate_single() {
+        let mut target = Target(BTreeMap::new());
+        target.0.insert("key1".to_string(), "value1".to_string());
+        let is = InterpolatedString(String::from("{{key1}}"));
+
+        let s = is.interpolate(&target).unwrap();
+        assert_eq!(s, "value1");
+    }
+
+    #[test]
+    fn interpolate_single_with_prefix() {
+        let mut target = Target(BTreeMap::new());
+        target.0.insert("key1".to_string(), "value1".to_string());
+        let is = InterpolatedString(String::from("prefix-{{key1}}"));
+
+        let s = is.interpolate(&target).unwrap();
+        assert_eq!(s, "prefix-value1");
+    }
+
+    #[test]
+    fn interpolate_single_with_suffix() {
+        let mut target = Target(BTreeMap::new());
+        target.0.insert("key1".to_string(), "value1".to_string());
+        let is = InterpolatedString(String::from("{{key1}}-suffix"));
+
+        let s = is.interpolate(&target).unwrap();
+        assert_eq!(s, "value1-suffix");
+    }
+
+    #[test]
+    fn interpolate_multiple() {
+        let mut target = Target(BTreeMap::new());
+        target.0.insert("key1".to_string(), "value1".to_string());
+        target.0.insert("key2".to_string(), "value2".to_string());
+        let is = InterpolatedString(String::from("{{key1}}-{{key2}}"));
+
+        let s = is.interpolate(&target).unwrap();
+        assert_eq!(s, "value1-value2");
+    }
+
+    #[test]
+    fn interpolate_missing_key() {
+        let mut target = Target(BTreeMap::new());
+        target.0.insert("key1".to_string(), "value1".to_string());
+        let is = InterpolatedString(String::from("{{key3}}"));
+
+        let err = is
+            .interpolate(&target)
+            .expect_err("Interpolating string should have failed");
+        assert_eq!(
+            err.to_string(),
+            "Key 'key3' not found in target, but required in '{{key3}}'"
+        );
+    }
+
+    #[test]
+    fn interpolate_missing_closing() {
+        let mut target = Target(BTreeMap::new());
+        target.0.insert("key1".to_string(), "value1".to_string());
+        let is = InterpolatedString(String::from("{{key1"));
+
+        let err = is
+            .interpolate(&target)
+            .expect_err("Interpolating string should have failed");
+        assert_eq!(
+            err.to_string(),
+            "Missing closing '}}' character in '{{key1'"
+        );
+    }
+
+    // This is mostly an example of "what not to do", but hey, we're here to
+    // test that we don't fall over.
+    //
+    // Until we see the "}}" sequence, all intermediate characters are treated
+    // as part of they key -- INCLUDING other "{{" characters.
+    #[test]
+    fn interpolate_key_as_literal() {
+        let mut target = Target(BTreeMap::new());
+        target.0.insert("oh{{no".to_string(), "value".to_string());
+        let is = InterpolatedString(String::from("{{oh{{no}}"));
+
+        let s = is.interpolate(&target).unwrap();
+        assert_eq!(s, "value");
+    }
 }

@@ -6,6 +6,7 @@
 mod test {
     use anyhow::Result;
     use omicron_zone_package::config;
+    use omicron_zone_package::target::Target;
     use std::fs::File;
     use std::io::Read;
     use std::path::{Path, PathBuf};
@@ -34,7 +35,10 @@ mod test {
 
         // Create the packaged file
         let out = tempfile::tempdir().unwrap();
-        package.create(package_name, out.path()).await.unwrap();
+        package
+            .create_for_target(&Target::default(), package_name, out.path())
+            .await
+            .unwrap();
 
         // Verify the contents
         let path = package.get_output_path(package_name, &out.path());
@@ -72,7 +76,10 @@ mod test {
 
         // Create the packaged file
         let out = tempfile::tempdir().unwrap();
-        package.create(package_name, out.path()).await.unwrap();
+        package
+            .create_for_target(&Target::default(), package_name, out.path())
+            .await
+            .unwrap();
 
         // Verify the contents
         let path = package.get_output_path(package_name, &out.path());
@@ -117,7 +124,10 @@ mod test {
 
         // Create the packaged file
         let out = tempfile::tempdir().unwrap();
-        package.create(package_name, out.path()).await.unwrap();
+        package
+            .create_for_target(&Target::default(), package_name, out.path())
+            .await
+            .unwrap();
 
         // Verify the contents
         let path = package.get_output_path(package_name, &out.path());
@@ -143,7 +153,10 @@ mod test {
 
         // Create the packaged file
         let out = tempfile::tempdir().unwrap();
-        package.create(package_name, out.path()).await.unwrap();
+        package
+            .create_for_target(&Target::default(), package_name, out.path())
+            .await
+            .unwrap();
 
         // Verify the contents
         let path = package.get_output_path(package_name, &out.path());
@@ -165,13 +178,19 @@ mod test {
         for package_name in package_dependencies {
             let package = cfg.packages.get(package_name).unwrap();
             // Create the packaged file
-            package.create(package_name, out.path()).await.unwrap();
+            package
+                .create_for_target(&Target::default(), package_name, out.path())
+                .await
+                .unwrap();
         }
 
         // Build the composite package
         let package_name = "pkg-3";
         let package = cfg.packages.get(package_name).unwrap();
-        package.create(package_name, out.path()).await.unwrap();
+        package
+            .create_for_target(&Target::default(), package_name, out.path())
+            .await
+            .unwrap();
 
         // Verify the contents
         let path = package.get_output_path(package_name, &out.path());
