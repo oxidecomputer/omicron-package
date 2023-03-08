@@ -338,6 +338,7 @@ impl Package {
 
     /// Identical to [`Self::create`], but allows a caller to receive updates
     /// about progress while constructing the package.
+    #[deprecated(note = "Call Self::create_with_progress_for_target instead")]
     pub async fn create_with_progress(
         &self,
         progress: &impl Progress,
@@ -346,6 +347,19 @@ impl Package {
     ) -> Result<File> {
         let null_target = Target(BTreeMap::new());
         self.create_internal(&null_target, progress, name, output_directory)
+            .await
+    }
+
+    /// Identical to [`Self::create`], but allows a caller to receive updates
+    /// about progress while constructing the package.
+    pub async fn create_with_progress_for_target(
+        &self,
+        progress: &impl Progress,
+        target: &Target,
+        name: &str,
+        output_directory: &Path,
+    ) -> Result<File> {
+        self.create_internal(&target, progress, name, output_directory)
             .await
     }
 
