@@ -270,6 +270,8 @@ pub struct Package {
     pub setup_hint: Option<String>,
 }
 
+const DEFAULT_VERSION: semver::Version = semver::Version::new(0, 0, 0);
+
 async fn new_zone_archive_builder(
     package_name: &str,
     output_directory: &Path,
@@ -291,8 +293,7 @@ async fn new_zone_archive_builder(
     // See the OMICRON1(5) man page for more detail.
     let mut root_json = tokio::fs::File::from_std(tempfile::tempfile()?);
 
-    let default_version = semver::Version::new(0, 0, 0);
-    let version = version.unwrap_or_else(|| &default_version);
+    let version = version.map(|v| v.clone()).unwrap_or_else(|| DEFAULT_VERSION);
     let version = &version.to_string();
 
     let kvs = vec![
@@ -354,11 +355,9 @@ impl Package {
     ) -> Result<PathBuf> {
         let stamp_path = self.get_stamped_output_path(name, &output_directory);
         std::fs::create_dir_all(&stamp_path.parent().unwrap())?;
-        let version_filename = Path::new("VERSION");
 
         match self.output {
             PackageOutput::Zone { .. } => {
-                let version_path = Path::new("/opt/oxide").join(version_filename);
                 // Add the package to "itself", but as a stamped version.
                 //
                 // We jump through some hoops to avoid modifying the archive
@@ -369,19 +368,6 @@ impl Package {
                         .await?;
                 let package_path = self.get_output_path(name, &output_directory);
                 add_package_to_zone_archive(&mut archive, &package_path).await?;
-
-                // Add the version file to the archive.
-                let mut version_file = tokio::fs::File::from_std(tempfile::tempfile()?);
-                version_file
-                    .write_all(version.to_string().as_bytes())
-                    .await?;
-                version_file.seek(std::io::SeekFrom::Start(0)).await?;
-                archive
-                    .append_file_async(
-                        archive_path(&version_path)?,
-                        &mut version_file.into_std().await,
-                    )
-                    .await?;
 
                 // Finalize the archive.
                 archive
@@ -396,6 +382,9 @@ impl Package {
                 let tmp = tempfile::tempdir()?;
                 reader.unpack(tmp.path())?;
 
+                // Remove the placeholder version
+                std::fs::remove_file(tmp.path().join("VERSION"))?;
+
                 // Create the new tarball
                 let file = create_tarfile(&stamp_path)?;
                 // TODO: We could add compression here, if we'd like?
@@ -403,15 +392,7 @@ impl Package {
                 archive.mode(tar::HeaderMode::Deterministic);
                 archive.append_dir_all_async(".", tmp.path()).await?;
 
-                // Add the version file to the archive
-                let mut version_file = tokio::fs::File::from_std(tempfile::tempfile()?);
-                version_file
-                    .write_all(version.to_string().as_bytes())
-                    .await?;
-                version_file.seek(std::io::SeekFrom::Start(0)).await?;
-                archive
-                    .append_file_async(version_filename, &mut version_file.into_std().await)
-                    .await?;
+                self.add_stamp_to_tarball_package(&mut archive, version).await?;
 
                 // Finalize the archive.
                 archive.finish()?;
@@ -671,6 +652,24 @@ impl Package {
         Ok(file.finish()?)
     }
 
+    async fn add_stamp_to_tarball_package(
+        &self,
+        archive: &mut Builder<File>,
+        version: &semver::Version,
+    ) -> Result<()> {
+        // Add the version file to the archive
+        let mut version_file = tokio::fs::File::from_std(tempfile::tempfile()?);
+        version_file
+            .write_all(version.to_string().as_bytes())
+            .await?;
+        version_file.seek(std::io::SeekFrom::Start(0)).await?;
+        let version_filename = Path::new("VERSION");
+        archive
+            .append_file_async(version_filename, &mut version_file.into_std().await)
+            .await?;
+        Ok(())
+    }
+
     async fn create_tarball_package(
         &self,
         progress: &impl Progress,
@@ -696,6 +695,9 @@ impl Package {
                 // Add (and possibly download) blobs
                 self.add_blobs(progress, &mut archive, output_directory, Path::new(BLOB))
                     .await?;
+
+                // Add a placeholder version stamp
+                self.add_stamp_to_tarball_package(&mut archive, &DEFAULT_VERSION).await?;
 
                 Ok(archive
                     .into_inner()
