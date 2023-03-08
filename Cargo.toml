@@ -3,6 +3,11 @@ name = "omicron-zone-package"
 version = "0.7.1"
 authors = ["Sean Klein <sean@oxidecomputer.com>"]
 edition = "2018"
+#
+# Report a specific error in the case that the toolchain is too old for
+# let-else:
+#
+rust-version = "1.65.0"
 license = "MPL-2.0"
 repository = "https://github.com/oxidecomputer/omicron-package"
 description = "Packaging tools for Oxide's control plane software"
