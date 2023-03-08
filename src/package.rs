@@ -694,7 +694,7 @@ pub struct InterpolatedString(String);
 impl InterpolatedString {
     // Interpret the string for the specified target.
     // Substitutes key/value pairs as necessary.
-    fn interpolate(&self, target: &Target) -> Result<String> {
+    pub fn interpolate(&self, target: &Target) -> Result<String> {
         let mut input = self.0.as_str();
         let mut output = String::new();
 
