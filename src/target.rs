@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 /// A target describes what platform and configuration we're trying
 /// to deploy on.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Target(pub BTreeMap<String, String>);
 
 impl Target {
