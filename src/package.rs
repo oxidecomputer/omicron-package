@@ -427,15 +427,23 @@ impl Package {
                 .sort_by_file_name();
             for entry in entries {
                 let entry = entry?;
-                let dst = &to.join(entry.path().strip_prefix(&from_root)?);
+                let dst = if from.is_dir() {
+                    // If copying a directory (and intermediates), strip out the
+                    // source prefix when creating the target path.
+                    to.join(entry.path().strip_prefix(&from_root)?)
+                } else {
+                    // If copying a single file, it should be copied exactly.
+                    assert_eq!(entry.path(), from_root.as_path());
+                    to.clone()
+                };
 
                 let dst = match self.output {
                     PackageOutput::Zone { .. } => {
                         // Zone images must explicitly label all destination paths
                         // as within "root/".
-                        archive_path(dst)?
+                        archive_path(&dst)?
                     }
-                    PackageOutput::Tarball => dst.to_path_buf(),
+                    PackageOutput::Tarball => dst,
                 };
 
                 if entry.file_type().is_dir() {
@@ -715,7 +723,7 @@ impl InterpolatedString {
             output.push_str(&value);
             input = &input[end_idx + END_STR.len()..];
         }
-        output.push_str(&input[..]);
+        output.push_str(input);
         Ok(output)
     }
 }
