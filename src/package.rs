@@ -295,7 +295,9 @@ async fn new_zone_archive_builder(
     // See the OMICRON1(5) man page for more detail.
     let mut root_json = tokio::fs::File::from_std(tempfile::tempfile()?);
 
-    let version = version.map(|v| v.clone()).unwrap_or_else(|| DEFAULT_VERSION);
+    let version = version
+        .map(|v| v.clone())
+        .unwrap_or_else(|| DEFAULT_VERSION);
     let version = &version.to_string();
 
     let kvs = vec![
@@ -406,13 +408,14 @@ impl Package {
                 archive.mode(tar::HeaderMode::Deterministic);
                 archive.append_dir_all_async(".", tmp.path()).await?;
 
-                self.add_stamp_to_tarball_package(&mut archive, version).await?;
+                self.add_stamp_to_tarball_package(&mut archive, version)
+                    .await?;
 
                 // Finalize the archive.
                 archive.finish()?;
             }
         }
-        Ok(stamp_path.into())
+        Ok(stamp_path)
     }
 
     /// Returns the "total number of things to be done" when constructing a
@@ -754,7 +757,8 @@ impl Package {
                     .await?;
 
                 // Add a placeholder version stamp
-                self.add_stamp_to_tarball_package(&mut archive, &DEFAULT_VERSION).await?;
+                self.add_stamp_to_tarball_package(&mut archive, &DEFAULT_VERSION)
+                    .await?;
 
                 Ok(archive
                     .into_inner()
