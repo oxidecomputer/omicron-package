@@ -16,10 +16,11 @@ description = "Packaging tools for Oxide's control plane software"
 anyhow = "1.0"
 async-trait = "0.1.64"
 chrono = "0.4.23"
-filetime = "0.2.20"
+filetime = "0.2"
 flate2 = "1.0.25"
 futures-util = "0.3"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "stream"] }
+semver = { version = "1.0.16", features = ["std", "serde"] }
 serde = { version = "1.0", features = [ "derive" ] }
 serde_derive = "1.0"
 tar = "0.4"

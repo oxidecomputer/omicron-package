@@ -135,6 +135,7 @@ mod test {
         let mut archive = Archive::new(File::open(path).unwrap());
         let mut ents = archive.entries().unwrap();
         assert_eq!(Path::new("test-service"), get_next(&mut ents));
+        assert_eq!(Path::new("VERSION"), get_next(&mut ents));
         assert!(ents.next().is_none());
     }
 
@@ -164,6 +165,7 @@ mod test {
         let mut archive = Archive::new(File::open(path).unwrap());
         let mut ents = archive.entries().unwrap();
         assert_eq!(Path::new("test-service"), get_next(&mut ents));
+        assert_eq!(Path::new("VERSION"), get_next(&mut ents));
         assert!(ents.next().is_none());
     }
 
