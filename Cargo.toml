@@ -14,7 +14,7 @@ description = "Packaging tools for Oxide's control plane software"
 
 [dependencies]
 anyhow = "1.0"
-async-trait = "0.1.64"
+async-trait = "0.1.67"
 chrono = "0.4.23"
 filetime = "0.2"
 flate2 = "1.0.25"
