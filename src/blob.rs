@@ -64,6 +64,9 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
     }
 
     let response = client.get(url).send().await?;
+    if !response.status().is_success() {
+        bail!("get failed! {:?}", response);
+    }
 
     // Store modified time from HTTPS response
     let last_modified = response
