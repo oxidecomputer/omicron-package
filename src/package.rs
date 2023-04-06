@@ -172,6 +172,19 @@ async fn add_package_to_zone_archive(
     Ok(())
 }
 
+/// Describes a path to a Buildomat-generated artifact that should reside at
+/// the following path:
+///
+/// <https://buildomat.eng.oxide.computer/public/file/oxidecomputer/REPO/SERIES/COMMIT/ARTIFACT>
+#[derive(Deserialize, Debug)]
+pub struct PrebuiltBlob {
+    pub repo: String,
+    pub series: String,
+    pub commit: String,
+    pub artifact: String,
+    pub sha256: String,
+}
+
 /// Describes the origin of an externally-built package.
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -181,6 +194,9 @@ pub enum PackageSource {
         /// A list of blobs from the Omicron build S3 bucket which should be placed
         /// within this package.
         blobs: Option<Vec<PathBuf>>,
+
+        /// A list of Buildomat blobs that should be placed in this package.
+        buildomat_blobs: Option<Vec<PrebuiltBlob>>,
 
         /// Configuration for packages containing Rust binaries.
         rust: Option<RustPackage>,
@@ -225,6 +241,16 @@ impl PackageSource {
             PackageSource::Local {
                 blobs: Some(blobs), ..
             } => Some(blobs),
+            _ => None,
+        }
+    }
+
+    fn buildomat_blobs(&self) -> Option<&[PrebuiltBlob]> {
+        match self {
+            PackageSource::Local {
+                buildomat_blobs: Some(buildomat_blobs),
+                ..
+            } => Some(buildomat_blobs),
             _ => None,
         }
     }
@@ -441,9 +467,14 @@ impl Package {
         // - 1 tick per rust binary
         // - 1 tick per blob + 1 tick for appending blob dir to archive
         let progress_total = match &self.source {
-            PackageSource::Local { blobs, rust, paths } => {
+            PackageSource::Local {
+                blobs,
+                buildomat_blobs,
+                rust,
+                paths,
+            } => {
                 let blob_work = blobs.as_ref().map(|b| b.len() + 1).unwrap_or(0);
-
+                let buildomat_work = buildomat_blobs.as_ref().map(|b| b.len()).unwrap_or(0);
                 let rust_work = rust.as_ref().map(|r| r.binary_names.len()).unwrap_or(0);
 
                 let mut paths_work = 0;
@@ -455,7 +486,7 @@ impl Package {
                         .count();
                 }
 
-                rust_work + blob_work + paths_work
+                rust_work + blob_work + buildomat_work + paths_work
             }
             _ => 1,
         };
@@ -631,19 +662,32 @@ impl Package {
         download_directory: &Path,
         destination_path: &Path,
     ) -> Result<()> {
+        let mut all_blobs = Vec::new();
         if let Some(blobs) = self.source.blobs() {
+            all_blobs.extend(blobs.iter().map(crate::blob::Source::S3));
+        }
+
+        if let Some(buildomat_blobs) = self.source.buildomat_blobs() {
+            all_blobs.extend(buildomat_blobs.iter().map(crate::blob::Source::Buildomat));
+        }
+
+        if !all_blobs.is_empty() {
             progress.set_message("downloading blobs".into());
             let blobs_path = download_directory.join(&self.service_name);
             std::fs::create_dir_all(&blobs_path)?;
-            stream::iter(blobs.iter())
+            stream::iter(all_blobs.iter())
                 .map(Ok)
                 .try_for_each_concurrent(None, |blob| {
-                    let blob_path = blobs_path.join(blob);
+                    let blob_path = match blob {
+                        blob::Source::S3(s) => blobs_path.join(s),
+                        blob::Source::Buildomat(spec) => blobs_path.join(&spec.artifact),
+                    };
+
                     async move {
-                        blob::download(progress, &blob.to_string_lossy(), &blob_path)
+                        blob::download(progress, blob, &blob_path)
                             .await
                             .with_context(|| {
-                                format!("failed to download blob: {}", blob.to_string_lossy())
+                                format!("failed to download blob: {}", blob.get_url())
                             })?;
                         progress.increment(1);
                         Ok::<_, anyhow::Error>(())
