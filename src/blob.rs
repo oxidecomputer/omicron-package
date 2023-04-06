@@ -4,7 +4,7 @@
 
 //! Tools for downloading blobs
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, FixedOffset, Utc};
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
@@ -28,11 +28,7 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
     let url = format!("{}/{}", S3_BUCKET, source);
     let client = reqwest::Client::new();
 
-    let head_response = client.head(&url).send().await?;
-    if !head_response.status().is_success() {
-        bail!("head failed! {:?}", head_response);
-    }
-
+    let head_response = client.head(&url).send().await?.error_for_status()?;
     let headers = head_response.headers();
 
     // From S3, header looks like:
@@ -63,10 +59,7 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
         }
     }
 
-    let response = client.get(url).send().await?;
-    if !response.status().is_success() {
-        bail!("get failed! {:?}", response);
-    }
+    let response = client.get(url).send().await?.error_for_status()?;
 
     // Store modified time from HTTPS response
     let last_modified = response
