@@ -465,7 +465,9 @@ impl Package {
         //
         // - 1 tick for each included path
         // - 1 tick per rust binary
-        // - 1 tick per blob + 1 tick for appending blob dir to archive
+        // - 1 tick per blob
+        // - 1 tick for appending the blob directory to the archive, but only if
+        //   there is at least one blob
         let progress_total = match &self.source {
             PackageSource::Local {
                 blobs,
@@ -473,8 +475,13 @@ impl Package {
                 rust,
                 paths,
             } => {
-                let blob_work = blobs.as_ref().map(|b| b.len() + 1).unwrap_or(0);
+                let blob_work = blobs.as_ref().map(|b| b.len()).unwrap_or(0);
                 let buildomat_work = buildomat_blobs.as_ref().map(|b| b.len()).unwrap_or(0);
+                let blob_dir_work = if blob_work != 0 || buildomat_work != 0 {
+                    1
+                } else {
+                    0
+                };
                 let rust_work = rust.as_ref().map(|r| r.binary_names.len()).unwrap_or(0);
 
                 let mut paths_work = 0;
@@ -486,7 +493,7 @@ impl Package {
                         .count();
                 }
 
-                rust_work + blob_work + buildomat_work + paths_work
+                rust_work + blob_work + buildomat_work + paths_work + blob_dir_work
             }
             _ => 1,
         };
