@@ -4,7 +4,7 @@
 
 //! Tools for downloading blobs
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, FixedOffset, Utc};
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
@@ -28,11 +28,7 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
     let url = format!("{}/{}", S3_BUCKET, source);
     let client = reqwest::Client::new();
 
-    let head_response = client.head(&url).send().await?;
-    if !head_response.status().is_success() {
-        bail!("head failed! {:?}", head_response);
-    }
-
+    let head_response = client.head(&url).send().await?.error_for_status()?;
     let headers = head_response.headers();
 
     // From S3, header looks like:
@@ -41,7 +37,7 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
     let content_length = headers
         .get(CONTENT_LENGTH)
         .ok_or_else(|| anyhow!("no content length on {} HEAD response!", url))?;
-    let content_length: u64 = u64::from_str(content_length.to_str()?)?;
+    let mut content_length: u64 = u64::from_str(content_length.to_str()?)?;
 
     if destination.exists() {
         // If destination exists, check against size and last modified time. If
@@ -63,11 +59,20 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
         }
     }
 
-    let response = client.get(url).send().await?;
+    let response = client.get(url).send().await?.error_for_status()?;
+    let response_headers = response.headers();
+
+    // Grab update Content-Length from response headers, if present.
+    // We only use it as a hint for the progress so no need to fail.
+    if let Some(Ok(Ok(resp_len))) = response_headers
+        .get(CONTENT_LENGTH)
+        .map(|c| c.to_str().map(u64::from_str))
+    {
+        content_length = resp_len;
+    }
 
     // Store modified time from HTTPS response
-    let last_modified = response
-        .headers()
+    let last_modified = response_headers
         .get(LAST_MODIFIED)
         .ok_or_else(|| anyhow!("no last modified on GET response!"))?;
     let last_modified: DateTime<FixedOffset> =
