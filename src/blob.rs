@@ -4,59 +4,105 @@
 
 //! Tools for downloading blobs
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, FixedOffset, Utc};
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
-use std::path::Path;
+use ring::digest::{Context as DigestContext, Digest, SHA256};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
-use crate::progress::Progress;
+use crate::progress::{NoProgress, Progress};
 
 // Path to the blob S3 Bucket.
 const S3_BUCKET: &str = "https://oxide-omicron-build.s3.amazonaws.com";
 // Name for the directory component where downloaded blobs are stored.
 pub(crate) const BLOB: &str = "blob";
 
+#[derive(Debug)]
+pub enum Source<'a> {
+    S3(&'a PathBuf),
+    Buildomat(&'a crate::package::PrebuiltBlob),
+}
+
+impl<'a> Source<'a> {
+    pub(crate) fn get_url(&self) -> String {
+        match self {
+            Self::S3(s) => format!("{}/{}", S3_BUCKET, s.to_string_lossy()),
+            Self::Buildomat(spec) => {
+                format!(
+                    "https://buildomat.eng.oxide.computer/public/file/oxidecomputer/{}/{}/{}/{}",
+                    spec.repo, spec.series, spec.commit, spec.artifact
+                )
+            }
+        }
+    }
+
+    async fn download_required(
+        &self,
+        url: &str,
+        client: &reqwest::Client,
+        destination: &Path,
+    ) -> Result<bool> {
+        if !destination.exists() {
+            return Ok(true);
+        }
+
+        match self {
+            Self::S3(_) => {
+                // Issue a HEAD request to get the blob's size and last modified
+                // time. If these match what's on disk, assume the blob is
+                // current and don't re-download it.
+                let head_response = client
+                    .head(url)
+                    .send()
+                    .await?
+                    .error_for_status()
+                    .with_context(|| format!("HEAD failed for {}", url))?;
+                let headers = head_response.headers();
+                let content_length = headers
+                    .get(CONTENT_LENGTH)
+                    .ok_or_else(|| anyhow!("no content length on {} HEAD response!", url))?;
+                let content_length: u64 = u64::from_str(content_length.to_str()?)?;
+
+                // From S3, header looks like:
+                //
+                //    "Last-Modified: Fri, 27 May 2022 20:50:17 GMT"
+                let last_modified = headers
+                    .get(LAST_MODIFIED)
+                    .ok_or_else(|| anyhow!("no last modified on {} HEAD response!", url))?;
+                let last_modified: DateTime<FixedOffset> =
+                    chrono::DateTime::parse_from_rfc2822(last_modified.to_str()?)?;
+
+                let metadata = tokio::fs::metadata(&destination).await?;
+                let metadata_modified: DateTime<Utc> = metadata.modified()?.into();
+
+                Ok(metadata.len() != content_length || metadata_modified != last_modified)
+            }
+            Self::Buildomat(blob_spec) => {
+                let digest = get_sha256_digest(destination).await?;
+                let expected_digest = hex::decode(&blob_spec.sha256)?;
+                Ok(digest.as_ref() != expected_digest)
+            }
+        }
+    }
+}
+
 // Downloads "source" from S3_BUCKET to "destination".
-pub async fn download(progress: &impl Progress, source: &str, destination: &Path) -> Result<()> {
+pub async fn download<'a>(
+    progress: &impl Progress,
+    source: &Source<'a>,
+    destination: &Path,
+) -> Result<()> {
     let blob = destination
         .file_name()
         .ok_or_else(|| anyhow!("missing blob filename"))?;
 
-    let url = format!("{}/{}", S3_BUCKET, source);
+    let url = source.get_url();
     let client = reqwest::Client::new();
-
-    let head_response = client.head(&url).send().await?.error_for_status()?;
-    let headers = head_response.headers();
-
-    // From S3, header looks like:
-    //
-    //    "Content-Length: 49283072"
-    let content_length = headers
-        .get(CONTENT_LENGTH)
-        .ok_or_else(|| anyhow!("no content length on {} HEAD response!", url))?;
-    let mut content_length: u64 = u64::from_str(content_length.to_str()?)?;
-
-    if destination.exists() {
-        // If destination exists, check against size and last modified time. If
-        // both are the same, then return Ok
-
-        // From S3, header looks like:
-        //
-        //    "Last-Modified: Fri, 27 May 2022 20:50:17 GMT"
-        let last_modified = headers
-            .get(LAST_MODIFIED)
-            .ok_or_else(|| anyhow!("no last modified on {} HEAD response!", url))?;
-        let last_modified: DateTime<FixedOffset> =
-            chrono::DateTime::parse_from_rfc2822(last_modified.to_str()?)?;
-        let metadata = tokio::fs::metadata(&destination).await?;
-        let metadata_modified: DateTime<Utc> = metadata.modified()?.into();
-
-        if metadata.len() == content_length && metadata_modified == last_modified {
-            return Ok(());
-        }
+    if !source.download_required(&url, &client, destination).await? {
+        return Ok(());
     }
 
     let response = client.get(url).send().await?.error_for_status()?;
@@ -64,25 +110,32 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
 
     // Grab update Content-Length from response headers, if present.
     // We only use it as a hint for the progress so no need to fail.
-    if let Some(Ok(Ok(resp_len))) = response_headers
+    let content_length = if let Some(Ok(Ok(resp_len))) = response_headers
         .get(CONTENT_LENGTH)
         .map(|c| c.to_str().map(u64::from_str))
     {
-        content_length = resp_len;
-    }
+        Some(resp_len)
+    } else {
+        None
+    };
 
-    // Store modified time from HTTPS response
-    let last_modified = response_headers
-        .get(LAST_MODIFIED)
-        .ok_or_else(|| anyhow!("no last modified on GET response!"))?;
-    let last_modified: DateTime<FixedOffset> =
-        chrono::DateTime::parse_from_rfc2822(last_modified.to_str()?)?;
+    // If the server advertised a last-modified time for the blob, save it here
+    // so that the downloaded blob's last-modified time can be set to it.
+    let last_modified = if let Some(time) = response_headers.get(LAST_MODIFIED) {
+        Some(chrono::DateTime::parse_from_rfc2822(time.to_str()?)?)
+    } else {
+        None
+    };
 
     // Write file bytes to destination
     let mut file = tokio::fs::File::create(destination).await?;
 
     // Create a sub-progress for the blob download
-    let blob_progress = progress.sub_progress(content_length);
+    let blob_progress = if let Some(length) = content_length {
+        progress.sub_progress(length)
+    } else {
+        Box::new(NoProgress)
+    };
     blob_progress.set_message(blob.to_string_lossy().into_owned().into());
 
     let mut stream = response.bytes_stream();
@@ -107,12 +160,37 @@ pub async fn download(progress: &impl Progress, source: &str, destination: &Path
     drop(file);
 
     // Set destination file's modified time based on HTTPS response
-    filetime::set_file_mtime(
-        destination,
-        filetime::FileTime::from_system_time(last_modified.into()),
-    )?;
+    if let Some(last_modified) = last_modified {
+        filetime::set_file_mtime(
+            destination,
+            filetime::FileTime::from_system_time(last_modified.into()),
+        )?;
+    }
 
     Ok(())
+}
+
+async fn get_sha256_digest(path: &Path) -> Result<Digest> {
+    let mut reader = BufReader::new(
+        tokio::fs::File::open(path)
+            .await
+            .with_context(|| format!("could not open {path:?}"))?,
+    );
+    let mut context = DigestContext::new(&SHA256);
+    let mut buffer = [0; 1024];
+
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("failed to read {path:?}"))?;
+        if count == 0 {
+            break;
+        } else {
+            context.update(&buffer[..count]);
+        }
+    }
+    Ok(context.finish())
 }
 
 #[test]

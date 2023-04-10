@@ -231,11 +231,12 @@ mod test {
     async fn test_download() -> Result<()> {
         let out = tempfile::tempdir()?;
 
-        let url = "OVMF_CODE.fd";
-        let dst = out.path().join(url);
+        let path = PathBuf::from("OVMF_CODE.fd");
+        let src = omicron_zone_package::blob::Source::S3(&path);
+        let dst = out.path().join(&path);
 
-        download(&NoProgress, &url, &dst).await?;
-        download(&NoProgress, &url, &dst).await?;
+        download(&NoProgress, &src, &dst).await?;
+        download(&NoProgress, &src, &dst).await?;
 
         Ok(())
     }
