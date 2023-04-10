@@ -477,11 +477,7 @@ impl Package {
             } => {
                 let blob_work = blobs.as_ref().map(|b| b.len()).unwrap_or(0);
                 let buildomat_work = buildomat_blobs.as_ref().map(|b| b.len()).unwrap_or(0);
-                let blob_dir_work = if blob_work != 0 || buildomat_work != 0 {
-                    1
-                } else {
-                    0
-                };
+                let blob_dir_work = (blob_work != 0 || buildomat_work != 0) as usize;
                 let rust_work = rust.as_ref().map(|r| r.binary_names.len()).unwrap_or(0);
 
                 let mut paths_work = 0;
