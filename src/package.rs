@@ -425,7 +425,11 @@ impl Package {
                 reader.unpack(tmp.path())?;
 
                 // Remove the placeholder version
-                std::fs::remove_file(tmp.path().join("VERSION"))?;
+                if let Err(err) = std::fs::remove_file(tmp.path().join("VERSION")) {
+                    if err.kind() != std::io::ErrorKind::NotFound {
+                        return Err(err.into());
+                    }
+                }
 
                 // Create the new tarball
                 let file = create_tarfile(&stamp_path)?;
