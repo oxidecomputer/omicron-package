@@ -175,10 +175,16 @@ mod test {
         let cfg = config::parse("tests/service-e/cfg.toml").unwrap();
         let out = tempfile::tempdir().unwrap();
 
+        // Ask for the order of packages to-be-built
+        let packages = cfg.packages_to_build(&Target::default());
+        let mut build_order = packages.build_order();
+
         // Build the dependencies first.
-        let package_dependencies = ["pkg-1", "pkg-2"];
-        for package_name in package_dependencies {
-            let package = cfg.packages.get(package_name).unwrap();
+        let batch = build_order.next().expect("Missing dependency batch");
+        let mut batch_pkg_names: Vec<_> = batch.iter().map(|(name, _)| *name).collect();
+        batch_pkg_names.sort();
+        assert_eq!(batch_pkg_names, vec!["pkg-1", "pkg-2"]);
+        for (package_name, package) in batch {
             // Create the packaged file
             package
                 .create_for_target(&Target::default(), package_name, out.path())
@@ -187,7 +193,10 @@ mod test {
         }
 
         // Build the composite package
+        let batch = build_order.next().expect("Missing dependency batch");
+        let batch_pkg_names: Vec<_> = batch.iter().map(|(name, _)| *name).collect();
         let package_name = "pkg-3";
+        assert_eq!(batch_pkg_names, vec![package_name]);
         let package = cfg.packages.get(package_name).unwrap();
         package
             .create_for_target(&Target::default(), package_name, out.path())

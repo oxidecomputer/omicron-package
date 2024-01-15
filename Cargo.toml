@@ -30,4 +30,5 @@ tempfile = "3.4"
 thiserror = "1.0"
 tokio = { version = "1.26", features = [ "full" ] }
 toml = "0.7.3"
+topological-sort = "0.2.2"
 walkdir = "2.3"

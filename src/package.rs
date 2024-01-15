@@ -176,7 +176,7 @@ async fn add_package_to_zone_archive(
 /// the following path:
 ///
 /// <https://buildomat.eng.oxide.computer/public/file/oxidecomputer/REPO/SERIES/COMMIT/ARTIFACT>
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, PartialEq)]
 pub struct PrebuiltBlob {
     pub repo: String,
     pub series: String,
@@ -186,7 +186,7 @@ pub struct PrebuiltBlob {
 }
 
 /// Describes the origin of an externally-built package.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PackageSource {
     /// Describes a package which should be assembled locally.
@@ -257,7 +257,7 @@ impl PackageSource {
 }
 
 /// Describes the output format of the package.
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PackageOutput {
     /// A complete zone image, ready to be deployed to the target.
@@ -274,7 +274,7 @@ pub enum PackageOutput {
 }
 
 /// A single package.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, PartialEq)]
 pub struct Package {
     /// The name of the service name to be used on the target OS.
     pub service_name: String,
@@ -821,7 +821,7 @@ impl Package {
 }
 
 /// Describes configuration for a package which contains a Rust binary.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, PartialEq)]
 pub struct RustPackage {
     /// The name of the compiled binary to be used.
     // TODO: Could be extrapolated to "produced build artifacts", we don't
@@ -869,7 +869,7 @@ impl RustPackage {
 }
 
 /// A string which can be modified with key-value pairs.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, PartialEq)]
 pub struct InterpolatedString(String);
 
 impl InterpolatedString {
@@ -891,7 +891,10 @@ impl InterpolatedString {
             };
             let key = &input[..end_idx];
             let Some(value) = target.0.get(key) else {
-                bail!("Key '{key}' not found in target, but required in '{}'", self.0);
+                bail!(
+                    "Key '{key}' not found in target, but required in '{}'",
+                    self.0
+                );
             };
             output.push_str(&value);
             input = &input[end_idx + END_STR.len()..];
@@ -902,7 +905,7 @@ impl InterpolatedString {
 }
 
 /// A pair of paths, mapping from a directory on the host to the target.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, PartialEq)]
 pub struct MappedPath {
     /// Source path.
     pub from: InterpolatedString,
