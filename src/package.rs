@@ -89,7 +89,7 @@ fn open_tarfile<P: AsRef<Path> + std::fmt::Debug>(tarfile: P) -> Result<File> {
 // - /opt/oxide -> root/opt/oxide
 fn archive_path(path: &Path) -> Result<PathBuf> {
     let leading_slash = std::path::MAIN_SEPARATOR.to_string();
-    Ok(Path::new("root").join(&path.strip_prefix(leading_slash)?))
+    Ok(Path::new("root").join(path.strip_prefix(leading_slash)?))
 }
 
 // Adds all parent directories of a path to the archive.
@@ -140,7 +140,7 @@ async fn add_package_to_zone_archive(
     package_path: &Path,
 ) -> Result<()> {
     let tmp = tempfile::tempdir()?;
-    let gzr = flate2::read::GzDecoder::new(open_tarfile(&package_path)?);
+    let gzr = flate2::read::GzDecoder::new(open_tarfile(package_path)?);
     if gzr.header().is_none() {
         return Err(anyhow!(
             "Missing gzip header from {} - cannot add it to zone image",
@@ -321,9 +321,7 @@ async fn new_zone_archive_builder(
     // See the OMICRON1(5) man page for more detail.
     let mut root_json = tokio::fs::File::from_std(tempfile::tempfile()?);
 
-    let version = version
-        .map(|v| v.clone())
-        .unwrap_or_else(|| DEFAULT_VERSION);
+    let version = version.cloned().unwrap_or(DEFAULT_VERSION);
     let version = &version.to_string();
 
     let kvs = vec![
@@ -344,7 +342,7 @@ async fn new_zone_archive_builder(
     root_json.write_all(contents.as_bytes()).await?;
     root_json.seek(std::io::SeekFrom::Start(0)).await?;
     archive
-        .append_file_async(&Path::new("oxide.json"), &mut root_json.into_std().await)
+        .append_file_async(Path::new("oxide.json"), &mut root_json.into_std().await)
         .await?;
 
     Ok(archive)
@@ -385,7 +383,7 @@ impl Package {
         name: &str,
         output_directory: &Path,
     ) -> Result<File> {
-        self.create_internal(&target, &NoProgress, name, output_directory)
+        self.create_internal(target, &NoProgress, name, output_directory)
             .await
     }
 
@@ -395,8 +393,8 @@ impl Package {
         output_directory: &Path,
         version: &semver::Version,
     ) -> Result<PathBuf> {
-        let stamp_path = self.get_stamped_output_path(name, &output_directory);
-        std::fs::create_dir_all(&stamp_path.parent().unwrap())?;
+        let stamp_path = self.get_stamped_output_path(name, output_directory);
+        std::fs::create_dir_all(stamp_path.parent().unwrap())?;
 
         match self.output {
             PackageOutput::Zone { .. } => {
@@ -408,7 +406,7 @@ impl Package {
                 let mut archive =
                     new_zone_archive_builder(name, stamp_path.parent().unwrap(), Some(version))
                         .await?;
-                let package_path = self.get_output_path(name, &output_directory);
+                let package_path = self.get_output_path(name, output_directory);
                 add_package_to_zone_archive(&mut archive, &package_path).await?;
 
                 // Finalize the archive.
@@ -486,7 +484,7 @@ impl Package {
 
                 let mut paths_work = 0;
                 for path in paths {
-                    let from = PathBuf::from(path.from.interpolate(&target)?);
+                    let from = PathBuf::from(path.from.interpolate(target)?);
                     paths_work += walkdir::WalkDir::new(&from)
                         .follow_links(true)
                         .into_iter()
@@ -523,7 +521,7 @@ impl Package {
         name: &str,
         output_directory: &Path,
     ) -> Result<File> {
-        self.create_internal(&target, progress, name, output_directory)
+        self.create_internal(target, progress, name, output_directory)
             .await
     }
 
@@ -556,8 +554,8 @@ impl Package {
         progress.set_message("adding paths".into());
 
         for path in paths {
-            let from = PathBuf::from(path.from.interpolate(&target)?);
-            let to = PathBuf::from(path.to.interpolate(&target)?);
+            let from = PathBuf::from(path.from.interpolate(target)?);
+            let to = PathBuf::from(path.to.interpolate(target)?);
 
             match self.output {
                 PackageOutput::Zone { .. } => {
@@ -703,7 +701,7 @@ impl Package {
                 .await?;
             progress.set_message("adding blobs".into());
             archive
-                .append_dir_all_async(&destination_path, &blobs_path)
+                .append_dir_all_async(destination_path, &blobs_path)
                 .await?;
             progress.increment(1);
         }
@@ -848,7 +846,7 @@ impl RustPackage {
             archive
                 .append_path_with_name_async(
                     Self::local_binary_path(name, self.release),
-                    dst_directory.join(&name),
+                    dst_directory.join(name),
                 )
                 .await
                 .map_err(|err| anyhow!("Cannot append binary to tarfile: {}", err))?;
@@ -896,7 +894,7 @@ impl InterpolatedString {
                     self.0
                 );
             };
-            output.push_str(&value);
+            output.push_str(value);
             input = &input[end_idx + END_STR.len()..];
         }
         output.push_str(input);
