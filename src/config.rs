@@ -13,7 +13,9 @@ use thiserror::Error;
 use topological_sort::TopologicalSort;
 
 /// Describes a set of packages to act upon.
-pub struct PackageMap<'a>(BTreeMap<&'a String, &'a Package>);
+///
+/// This structure maps "package name" to "package"
+pub struct PackageMap<'a>(pub BTreeMap<&'a String, &'a Package>);
 
 // The name of a file which should be created by building a package.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
