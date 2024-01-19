@@ -38,7 +38,7 @@ trait AsyncAppendFile {
 }
 
 #[async_trait]
-impl<W: std::io::Write + Send> AsyncAppendFile for Builder<W> {
+impl<W: Encoder> AsyncAppendFile for Builder<W> {
     async fn append_file_async<P>(&mut self, path: P, file: &mut File) -> std::io::Result<()>
     where
         P: AsRef<Path> + Send,
@@ -82,6 +82,14 @@ fn open_tarfile<P: AsRef<Path> + std::fmt::Debug>(tarfile: P) -> Result<File> {
         .map_err(|err| anyhow!("Cannot open tarfile {:?}: {}", tarfile, err))
 }
 
+trait Encoder: std::io::Write + Send {}
+impl<T> Encoder for T where T: std::io::Write + Send {}
+
+struct ArchiveBuilder<E: Encoder> {
+    builder: tar::Builder<E>,
+    inputs: crate::cache::Inputs,
+}
+
 // Returns the path as it should be placed within an archive, by
 // prepending "root/".
 //
@@ -111,8 +119,8 @@ fn archive_path(path: &Path) -> Result<PathBuf> {
 // - /root/opt
 // - /root/opt/oxide
 // - /root/opt/oxide/foo
-fn add_directory_and_parents<W: std::io::Write>(
-    archive: &mut tar::Builder<W>,
+fn add_directory_and_parents<E: Encoder>(
+    archive: &mut ArchiveBuilder<E>,
     to: &Path,
 ) -> Result<()> {
     let mut parents: Vec<&Path> = to.ancestors().collect::<Vec<&Path>>();
@@ -127,7 +135,7 @@ fn add_directory_and_parents<W: std::io::Write>(
 
     for parent in parents {
         let dst = archive_path(parent)?;
-        archive.append_dir(&dst, ".")?;
+        archive.builder.append_dir(&dst, ".")?;
     }
 
     Ok(())
@@ -135,8 +143,8 @@ fn add_directory_and_parents<W: std::io::Write>(
 
 // Adds a package at `package_path` to a new zone image
 // being built using the `archive` builder.
-async fn add_package_to_zone_archive(
-    archive: &mut tar::Builder<GzEncoder<File>>,
+async fn add_package_to_zone_archive<E: Encoder>(
+    archive: &mut ArchiveBuilder<E>,
     package_path: &Path,
 ) -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -166,6 +174,7 @@ async fn add_package_to_zone_archive(
         assert!(entry_unpack_path.exists());
 
         archive
+            .builder
             .append_path_with_name_async(entry_unpack_path, entry_path)
             .await?;
     }
@@ -304,7 +313,7 @@ async fn new_zone_archive_builder(
     package_name: &str,
     output_directory: &Path,
     version: Option<&semver::Version>,
-) -> Result<tar::Builder<GzEncoder<File>>> {
+) -> Result<ArchiveBuilder<GzEncoder<File>>> {
     let tarfile = output_directory.join(format!("{}.tar.gz", package_name));
     let file = create_tarfile(tarfile)?;
     // TODO: Consider using async compression, async tar.
@@ -345,7 +354,10 @@ async fn new_zone_archive_builder(
         .append_file_async(Path::new("oxide.json"), &mut root_json.into_std().await)
         .await?;
 
-    Ok(archive)
+    Ok(ArchiveBuilder {
+        builder: archive,
+        inputs: vec![],
+    })
 }
 
 impl Package {
@@ -411,6 +423,7 @@ impl Package {
 
                 // Finalize the archive.
                 archive
+                    .builder
                     .into_inner()
                     .map_err(|err| anyhow!("Failed to finalize archive: {}", err))?
                     .finish()?;
@@ -544,11 +557,11 @@ impl Package {
         }
     }
 
-    async fn add_paths<W: std::io::Write + Send + Sync>(
+    async fn add_paths<E: Encoder>(
         &self,
         target: &Target,
         progress: &impl Progress,
-        archive: &mut Builder<W>,
+        archive: &mut ArchiveBuilder<E>,
         paths: &Vec<MappedPath>,
     ) -> Result<()> {
         progress.set_message("adding paths".into());
@@ -609,9 +622,10 @@ impl Package {
                 };
 
                 if entry.file_type().is_dir() {
-                    archive.append_dir(&dst, ".")?;
+                    archive.builder.append_dir(&dst, ".")?;
                 } else if entry.file_type().is_file() {
                     archive
+                        .builder
                         .append_path_with_name_async(entry.path(), &dst)
                         .await
                         .context(format!(
@@ -632,10 +646,10 @@ impl Package {
         Ok(())
     }
 
-    async fn add_rust<W: std::io::Write + Send>(
+    async fn add_rust<E: Encoder>(
         &self,
         progress: &impl Progress,
-        archive: &mut Builder<W>,
+        archive: &mut ArchiveBuilder<E>,
     ) -> Result<()> {
         if let Some(rust_pkg) = self.source.rust_package() {
             let dst = match self.output {
@@ -660,10 +674,10 @@ impl Package {
     // - `package`: The package being constructed
     // - `download_directory`: The location to which the blobs should be downloaded
     // - `destination_path`: The destination path of the blobs within the archive
-    async fn add_blobs<W: std::io::Write + Send>(
+    async fn add_blobs<E: Encoder>(
         &self,
         progress: &impl Progress,
-        archive: &mut Builder<W>,
+        archive: &mut ArchiveBuilder<E>,
         download_directory: &Path,
         destination_path: &Path,
     ) -> Result<()> {
@@ -701,6 +715,7 @@ impl Package {
                 .await?;
             progress.set_message("adding blobs".into());
             archive
+                .builder
                 .append_dir_all_async(destination_path, &blobs_path)
                 .await?;
             progress.increment(1);
@@ -717,8 +732,14 @@ impl Package {
     ) -> Result<File> {
         let mut archive = new_zone_archive_builder(name, output_directory, None).await?;
 
+        // TODO: I think maybe "inputs" should be tightly coupled with the
+        // archive builder
+
         match &self.source {
             PackageSource::Local { paths, .. } => {
+
+                // TODO: track inputs and outputs
+
                 // Add mapped paths.
                 self.add_paths(target, progress, &mut archive, paths)
                     .await?;
@@ -753,6 +774,7 @@ impl Package {
         }
 
         let file = archive
+            .builder
             .into_inner()
             .map_err(|err| anyhow!("Failed to finalize archive: {}", err))?;
 
@@ -789,8 +811,11 @@ impl Package {
         let tarfile = self.get_output_path(name, output_directory);
         let file = create_tarfile(&tarfile)?;
         // TODO: We could add compression here, if we'd like?
-        let mut archive = Builder::new(file);
-        archive.mode(tar::HeaderMode::Deterministic);
+        let mut archive = ArchiveBuilder {
+            builder: Builder::new(file),
+            inputs: vec![],
+        };
+        archive.builder.mode(tar::HeaderMode::Deterministic);
 
         match &self.source {
             PackageSource::Local { paths, .. } => {
@@ -806,10 +831,11 @@ impl Package {
                     .await?;
 
                 // Add a placeholder version stamp
-                self.add_stamp_to_tarball_package(&mut archive, &DEFAULT_VERSION)
+                self.add_stamp_to_tarball_package(&mut archive.builder, &DEFAULT_VERSION)
                     .await?;
 
                 Ok(archive
+                    .builder
                     .into_inner()
                     .map_err(|err| anyhow!("Failed to finalize archive: {}", err))?)
             }
@@ -835,15 +861,16 @@ impl RustPackage {
     //
     // - `archive`: The archive to which the binary should be added
     // - `dst_directory`: The path where the binary should be added in the archive
-    async fn add_binaries_to_archive<W: std::io::Write + Send>(
+    async fn add_binaries_to_archive<E: Encoder>(
         &self,
         progress: &impl Progress,
-        archive: &mut tar::Builder<W>,
+        archive: &mut ArchiveBuilder<E>,
         dst_directory: &Path,
     ) -> Result<()> {
         for name in &self.binary_names {
             progress.set_message(format!("adding rust binary: {name}").into());
             archive
+                .builder
                 .append_path_with_name_async(
                     Self::local_binary_path(name, self.release),
                     dst_directory.join(name),

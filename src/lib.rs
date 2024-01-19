@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 pub mod blob;
+pub mod cache;
 pub mod config;
 pub mod package;
 pub mod progress;
