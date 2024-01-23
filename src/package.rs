@@ -11,7 +11,6 @@ use crate::target::Target;
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use flate2::write::GzEncoder;
-use futures_util::{stream, StreamExt, TryStreamExt};
 use serde_derive::Deserialize;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
@@ -19,6 +18,11 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use tar::Builder;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+// TODO: Scan for "append_file" / "append_path" usage?
+//
+// TODO: You could pull the "archive builder" part of this apart from the
+// packaging bits. This file is getting a bit long.
 
 #[async_trait]
 trait AsyncAppendFile {
@@ -88,6 +92,17 @@ impl<T> Encoder for T where T: std::io::Write + Send {}
 struct ArchiveBuilder<E: Encoder> {
     builder: tar::Builder<E>,
     inputs: crate::cache::Inputs,
+    output: PathBuf,
+}
+
+impl<E: Encoder> ArchiveBuilder<E> {
+    fn new(builder: tar::Builder<E>, output: PathBuf) -> Self {
+        Self {
+            builder,
+            inputs: vec![],
+            output,
+        }
+    }
 }
 
 // Returns the path as it should be placed within an archive, by
@@ -106,23 +121,13 @@ fn archive_path(path: &Path) -> Result<PathBuf> {
 //
 // - /opt/oxide/foo/bar.txt
 //
-// We could call the following:
-//
-// ```
-// let path = Path::new("/opt/oxide/foo/bar.txt");
-// add_directory_and_parents(&mut archive, path.parent().unwrap());
-// ```
-//
-// Which would add the following directories to the archive:
+// We would add the following directories to the archive:
 //
 // - /root
 // - /root/opt
 // - /root/opt/oxide
 // - /root/opt/oxide/foo
-fn add_directory_and_parents<E: Encoder>(
-    archive: &mut ArchiveBuilder<E>,
-    to: &Path,
-) -> Result<()> {
+fn add_directory_and_parents_walker(to: &Path) -> Result<Vec<TargetDirectory>> {
     let mut parents: Vec<&Path> = to.ancestors().collect::<Vec<&Path>>();
     parents.reverse();
 
@@ -133,12 +138,12 @@ fn add_directory_and_parents<E: Encoder>(
         ));
     }
 
+    let mut outputs = vec![];
     for parent in parents {
         let dst = archive_path(parent)?;
-        archive.builder.append_dir(&dst, ".")?;
+        outputs.push(TargetDirectory(dst))
     }
-
-    Ok(())
+    Ok(outputs)
 }
 
 // Adds a package at `package_path` to a new zone image
@@ -173,6 +178,7 @@ async fn add_package_to_zone_archive<E: Encoder>(
         let entry_path = entry.path()?;
         assert!(entry_unpack_path.exists());
 
+        archive.inputs.push(entry_unpack_path.clone());
         archive
             .builder
             .append_path_with_name_async(entry_unpack_path, entry_path)
@@ -212,7 +218,7 @@ pub enum PackageSource {
 
         /// A set of mapped paths which appear within the archive.
         #[serde(default)]
-        paths: Vec<MappedPath>,
+        paths: Vec<InterpolatedMappedPath>,
     },
 
     /// Downloads the package from the following URL:
@@ -315,7 +321,7 @@ async fn new_zone_archive_builder(
     version: Option<&semver::Version>,
 ) -> Result<ArchiveBuilder<GzEncoder<File>>> {
     let tarfile = output_directory.join(format!("{}.tar.gz", package_name));
-    let file = create_tarfile(tarfile)?;
+    let file = create_tarfile(&tarfile)?;
     // TODO: Consider using async compression, async tar.
     // It's not the *worst* thing in the world for a packaging tool to block
     // here, but it would help the other async threads remain responsive if
@@ -354,10 +360,7 @@ async fn new_zone_archive_builder(
         .append_file_async(Path::new("oxide.json"), &mut root_json.into_std().await)
         .await?;
 
-    Ok(ArchiveBuilder {
-        builder: archive,
-        inputs: vec![],
-    })
+    Ok(ArchiveBuilder::new(archive, tarfile))
 }
 
 impl Package {
@@ -407,6 +410,9 @@ impl Package {
     ) -> Result<PathBuf> {
         let stamp_path = self.get_stamped_output_path(name, output_directory);
         std::fs::create_dir_all(stamp_path.parent().unwrap())?;
+
+        // XXX I think the output file is "wrong" here -- we aren't picking up
+        // the stamped version...
 
         match self.output {
             PackageOutput::Zone { .. } => {
@@ -557,24 +563,27 @@ impl Package {
         }
     }
 
-    async fn add_paths<E: Encoder>(
+    fn add_paths_walker(
         &self,
         target: &Target,
-        progress: &impl Progress,
-        archive: &mut ArchiveBuilder<E>,
-        paths: &Vec<MappedPath>,
-    ) -> Result<()> {
-        progress.set_message("adding paths".into());
+        paths: &Vec<InterpolatedMappedPath>,
+    ) -> Result<Vec<BuildInput>> {
+        let mut outputs = vec![];
 
         for path in paths {
-            let from = PathBuf::from(path.from.interpolate(target)?);
-            let to = PathBuf::from(path.to.interpolate(target)?);
+            let path = path.interpolate(&target)?;
+            let from = path.from;
+            let to = path.to;
 
             match self.output {
                 PackageOutput::Zone { .. } => {
                     // Zone images require all paths to have their parents before
                     // they may be unpacked.
-                    add_directory_and_parents(archive, to.parent().unwrap())?;
+                    outputs.extend(
+                        add_directory_and_parents_walker(to.parent().unwrap())?
+                            .into_iter()
+                            .map(|dir| BuildInput::AddDirectory(dir)),
+                    );
                 }
                 PackageOutput::Tarball => {}
             }
@@ -622,17 +631,13 @@ impl Package {
                 };
 
                 if entry.file_type().is_dir() {
-                    archive.builder.append_dir(&dst, ".")?;
+                    outputs.push(BuildInput::AddDirectory(TargetDirectory(dst)));
                 } else if entry.file_type().is_file() {
-                    archive
-                        .builder
-                        .append_path_with_name_async(entry.path(), &dst)
-                        .await
-                        .context(format!(
-                            "Failed to add file '{}' to '{}'",
-                            entry.path().display(),
-                            dst.display()
-                        ))?;
+                    let src = entry.path();
+                    outputs.push(BuildInput::AddFile(MappedPath {
+                        from: src.to_path_buf(),
+                        to: dst,
+                    }));
                 } else {
                     panic!(
                         "Unsupported file type: {:?} for {:?}",
@@ -640,87 +645,101 @@ impl Package {
                         entry
                     );
                 }
-                progress.increment(1);
             }
         }
-        Ok(())
+
+        Ok(outputs)
     }
 
-    async fn add_rust<E: Encoder>(
+    fn all_paths_walker(
         &self,
-        progress: &impl Progress,
-        archive: &mut ArchiveBuilder<E>,
-    ) -> Result<()> {
+        target: &Target,
+        output_directory: &Path,
+        zoned: bool,
+    ) -> Result<Vec<BuildInput>> {
+        let mut all_paths = vec![];
+
+        match &self.source {
+            PackageSource::Local { paths, .. } => {
+                all_paths.extend(self.add_paths_walker(target, &paths)?);
+                all_paths.extend(self.add_rust_walker()?);
+                all_paths.extend(self.add_blobs_walker(output_directory, zoned)?);
+            }
+            PackageSource::Composite { packages } => {
+                for component_package in packages {
+                    all_paths.push(BuildInput::AddPackage(TargetPackage(
+                        output_directory.join(component_package),
+                    )));
+                }
+            }
+            _ => {
+                return Err(anyhow!(
+                    "Cannot walk over a zone package with source: {:?}",
+                    self.source
+                ));
+            }
+        }
+
+        Ok(all_paths)
+    }
+
+    fn add_rust_walker(&self) -> Result<Vec<BuildInput>> {
+        let mut outputs = vec![];
         if let Some(rust_pkg) = self.source.rust_package() {
-            let dst = match self.output {
+            let dst_directory = match self.output {
                 PackageOutput::Zone { .. } => {
                     let dst = Path::new("/opt/oxide").join(&self.service_name).join("bin");
-                    add_directory_and_parents(archive, &dst)?;
+                    outputs.extend(
+                        add_directory_and_parents_walker(&dst)?
+                            .into_iter()
+                            .map(|dir| BuildInput::AddDirectory(dir)),
+                    );
+
                     archive_path(&dst)?
                 }
                 PackageOutput::Tarball => PathBuf::from(""),
             };
-            rust_pkg
-                .add_binaries_to_archive(progress, archive, &dst)
-                .await?;
+
+            for binary in &rust_pkg.binary_names {
+                let from = RustPackage::local_binary_path(binary, rust_pkg.release);
+                let to = dst_directory.join(binary);
+                outputs.push(BuildInput::AddFile(MappedPath { from, to }));
+            }
         }
-        Ok(())
+        Ok(outputs)
     }
 
-    // Adds blobs from S3 to the package.
-    //
-    // - `progress`: Reports progress while adding blobs.
-    // - `archive`: The archive to add the blobs into
-    // - `package`: The package being constructed
-    // - `download_directory`: The location to which the blobs should be downloaded
-    // - `destination_path`: The destination path of the blobs within the archive
-    async fn add_blobs<E: Encoder>(
-        &self,
-        progress: &impl Progress,
-        archive: &mut ArchiveBuilder<E>,
-        download_directory: &Path,
-        destination_path: &Path,
-    ) -> Result<()> {
-        let mut all_blobs = Vec::new();
-        if let Some(blobs) = self.source.blobs() {
-            all_blobs.extend(blobs.iter().map(crate::blob::Source::S3));
-        }
+    fn add_blobs_walker(&self, download_directory: &Path, zoned: bool) -> Result<Vec<BuildInput>> {
+        let mut outputs = vec![];
 
+        let destination_path = if zoned {
+            archive_path(&Path::new("/opt/oxide").join(&self.service_name).join(BLOB))?
+        } else {
+            PathBuf::from(BLOB)
+        };
+        if let Some(s3_blobs) = self.source.blobs() {
+            outputs.extend(s3_blobs.into_iter().map(|blob| {
+                let from = download_directory.join(&self.service_name).join(blob);
+                let to = destination_path.join(blob);
+                BuildInput::AddBlob {
+                    path: MappedPath { from, to },
+                    blob: crate::blob::Source::S3(blob.clone()),
+                }
+            }))
+        }
         if let Some(buildomat_blobs) = self.source.buildomat_blobs() {
-            all_blobs.extend(buildomat_blobs.iter().map(crate::blob::Source::Buildomat));
+            outputs.extend(buildomat_blobs.into_iter().map(|blob| {
+                let from = download_directory
+                    .join(&self.service_name)
+                    .join(&blob.artifact);
+                let to = destination_path.join(&blob.artifact);
+                BuildInput::AddBlob {
+                    path: MappedPath { from, to },
+                    blob: crate::blob::Source::Buildomat(blob.clone()),
+                }
+            }));
         }
-
-        if !all_blobs.is_empty() {
-            progress.set_message("downloading blobs".into());
-            let blobs_path = download_directory.join(&self.service_name);
-            std::fs::create_dir_all(&blobs_path)?;
-            stream::iter(all_blobs.iter())
-                .map(Ok)
-                .try_for_each_concurrent(None, |blob| {
-                    let blob_path = match blob {
-                        blob::Source::S3(s) => blobs_path.join(s),
-                        blob::Source::Buildomat(spec) => blobs_path.join(&spec.artifact),
-                    };
-
-                    async move {
-                        blob::download(progress, blob, &blob_path)
-                            .await
-                            .with_context(|| {
-                                format!("failed to download blob: {}", blob.get_url())
-                            })?;
-                        progress.increment(1);
-                        Ok::<_, anyhow::Error>(())
-                    }
-                })
-                .await?;
-            progress.set_message("adding blobs".into());
-            archive
-                .builder
-                .append_dir_all_async(destination_path, &blobs_path)
-                .await?;
-            progress.increment(1);
-        }
-        Ok(())
+        Ok(outputs)
     }
 
     async fn create_zone_package(
@@ -730,53 +749,29 @@ impl Package {
         name: &str,
         output_directory: &Path,
     ) -> Result<File> {
+        let cache = crate::cache::Cache::new(output_directory).await?;
         let mut archive = new_zone_archive_builder(name, output_directory, None).await?;
 
-        // TODO: I think maybe "inputs" should be tightly coupled with the
-        // archive builder
+        let zoned = true;
+        let all_inputs = self.all_paths_walker(target, output_directory, zoned)?;
 
-        match &self.source {
-            PackageSource::Local { paths, .. } => {
+        if let Some(cached_manifest) = cache.lookup(archive.output.file_name().unwrap()).await? {
+            // So the artifact exists, and we have a cached manifest that
+            // describes it.
 
-                // TODO: track inputs and outputs
-
-                // Add mapped paths.
-                self.add_paths(target, progress, &mut archive, paths)
-                    .await?;
-
-                // Attempt to add the rust binary, if one was built.
-                self.add_rust(progress, &mut archive).await?;
-
-                // Add (and possibly download) blobs
-                let blob_dst = Path::new("/opt/oxide").join(&self.service_name).join(BLOB);
-                self.add_blobs(
-                    progress,
-                    &mut archive,
-                    output_directory,
-                    &archive_path(&blob_dst)?,
-                )
-                .await?;
-            }
-            PackageSource::Composite { packages } => {
-                // For each of the component packages, open the tarfile, and add
-                // it to our top-level archive.
-                for component_package in packages {
-                    let component_path = output_directory.join(component_package);
-                    add_package_to_zone_archive(&mut archive, &component_path).await?;
-                }
-            }
-            _ => {
-                return Err(anyhow!(
-                    "Cannot create a zone package with source: {:?}",
-                    self.source
-                ));
-            }
+            // TODO Cache lookup
         }
 
+        for input in &all_inputs {
+            self.add_input_to_package(progress, &mut archive, &input)
+                .await?;
+        }
         let file = archive
             .builder
             .into_inner()
             .map_err(|err| anyhow!("Failed to finalize archive: {}", err))?;
+
+        // TODO: cache information about the created file?
 
         Ok(file.finish()?)
     }
@@ -799,6 +794,57 @@ impl Package {
         Ok(())
     }
 
+    async fn add_input_to_package<E: Encoder>(
+        &self,
+        progress: &impl Progress,
+        archive: &mut ArchiveBuilder<E>,
+        input: &BuildInput,
+    ) -> Result<()> {
+        match &input {
+            BuildInput::AddDirectory(dir) => archive.builder.append_dir(&dir.0, ".")?,
+            BuildInput::AddFile(paths) => {
+                let src = &paths.from;
+                let dst = &paths.to;
+                progress.set_message(format!("adding file: {}", src.display()).into());
+                archive
+                    .builder
+                    .append_path_with_name_async(&src, &dst)
+                    .await
+                    .context(format!(
+                        "Failed to add file '{}' to '{}'",
+                        src.display(),
+                        dst.display()
+                    ))?;
+                progress.increment(1);
+            }
+            BuildInput::AddBlob { path, blob } => {
+                // TODO: Like the rust packages being built ahead-of-time,
+                // we could ensure all the blobs have been downloaded before
+                // adding them to this package?
+                //
+                // TODO: That seems important to preserve concurrency of
+                // downloads.
+                let blobs_path = path.from.parent().unwrap();
+                std::fs::create_dir_all(&blobs_path)?;
+
+                let blob_path = match &blob {
+                    blob::Source::S3(s) => blobs_path.join(s),
+                    blob::Source::Buildomat(spec) => blobs_path.join(&spec.artifact),
+                };
+
+                blob::download(progress, &blob, &blob_path)
+                    .await
+                    .with_context(|| format!("failed to download blob: {}", blob.get_url()))?;
+                progress.increment(1);
+            }
+            BuildInput::AddPackage(component_package) => {
+                add_package_to_zone_archive(archive, &component_package.0).await?;
+                progress.increment(1);
+            }
+        }
+        Ok(())
+    }
+
     async fn create_tarball_package(
         &self,
         target: &Target,
@@ -811,36 +857,27 @@ impl Package {
         let tarfile = self.get_output_path(name, output_directory);
         let file = create_tarfile(&tarfile)?;
         // TODO: We could add compression here, if we'd like?
-        let mut archive = ArchiveBuilder {
-            builder: Builder::new(file),
-            inputs: vec![],
-        };
+        let mut archive = ArchiveBuilder::new(Builder::new(file), tarfile);
         archive.builder.mode(tar::HeaderMode::Deterministic);
 
-        match &self.source {
-            PackageSource::Local { paths, .. } => {
-                // Add mapped paths.
-                self.add_paths(target, progress, &mut archive, paths)
-                    .await?;
-
-                // Attempt to add the rust binary, if one was built.
-                self.add_rust(progress, &mut archive).await?;
-
-                // Add (and possibly download) blobs
-                self.add_blobs(progress, &mut archive, output_directory, Path::new(BLOB))
-                    .await?;
-
-                // Add a placeholder version stamp
-                self.add_stamp_to_tarball_package(&mut archive.builder, &DEFAULT_VERSION)
-                    .await?;
-
-                Ok(archive
-                    .builder
-                    .into_inner()
-                    .map_err(|err| anyhow!("Failed to finalize archive: {}", err))?)
-            }
-            _ => Err(anyhow!("Cannot create non-local tarball")),
+        if !matches!(self.source, PackageSource::Local { .. }) {
+            bail!("Cannot create non-local tarball");
         }
+
+        let zoned = false;
+        for input in self.all_paths_walker(target, output_directory, zoned)? {
+            self.add_input_to_package(progress, &mut archive, &input)
+                .await?;
+        }
+
+        // Add a placeholder version stamp
+        self.add_stamp_to_tarball_package(&mut archive.builder, &DEFAULT_VERSION)
+            .await?;
+
+        Ok(archive
+            .builder
+            .into_inner()
+            .map_err(|err| anyhow!("Failed to finalize archive: {}", err))?)
     }
 }
 
@@ -857,31 +894,6 @@ pub struct RustPackage {
 }
 
 impl RustPackage {
-    // Adds a rust binary to the archive.
-    //
-    // - `archive`: The archive to which the binary should be added
-    // - `dst_directory`: The path where the binary should be added in the archive
-    async fn add_binaries_to_archive<E: Encoder>(
-        &self,
-        progress: &impl Progress,
-        archive: &mut ArchiveBuilder<E>,
-        dst_directory: &Path,
-    ) -> Result<()> {
-        for name in &self.binary_names {
-            progress.set_message(format!("adding rust binary: {name}").into());
-            archive
-                .builder
-                .append_path_with_name_async(
-                    Self::local_binary_path(name, self.release),
-                    dst_directory.join(name),
-                )
-                .await
-                .map_err(|err| anyhow!("Cannot append binary to tarfile: {}", err))?;
-            progress.increment(1);
-        }
-        Ok(())
-    }
-
     // Returns the path to the compiled binary.
     fn local_binary_path(name: &str, release: bool) -> PathBuf {
         format!(
@@ -929,13 +941,78 @@ impl InterpolatedString {
     }
 }
 
-/// A pair of paths, mapping from a directory on the host to the target.
+// TODO: Pull these mapped paths into a new module?
+
+/// A pair of path templates, mapping from a file or directory on the host to the target.
+///
+/// These paths may require target-specific interpretation before being
+/// transformed to an actual [MappedPath].
 #[derive(Clone, Deserialize, Debug, PartialEq)]
-pub struct MappedPath {
+pub struct InterpolatedMappedPath {
     /// Source path.
     pub from: InterpolatedString,
     /// Destination path.
     pub to: InterpolatedString,
+}
+
+impl InterpolatedMappedPath {
+    fn interpolate(&self, target: &Target) -> Result<MappedPath> {
+        Ok(MappedPath {
+            from: PathBuf::from(self.from.interpolate(target)?),
+            to: PathBuf::from(self.to.interpolate(target)?),
+        })
+    }
+}
+
+/// A directory that should be added to the target archive.
+pub struct TargetDirectory(PathBuf);
+
+/// A package that should be added  to the target archive.
+pub struct TargetPackage(PathBuf);
+
+/// A pair of paths, mapping from a file or directory on the host to the target.
+#[derive(Clone, Deserialize, Debug, PartialEq)]
+pub struct MappedPath {
+    /// Source path.
+    pub from: PathBuf,
+    /// Destination path.
+    pub to: PathBuf,
+}
+
+enum BuildInput {
+    // Add a single directory to the target archive.
+    //
+    // This directory doesn't need to exist on the build host.
+    AddDirectory(TargetDirectory),
+
+    // Add a file directly from source to target.
+    AddFile(MappedPath),
+
+    // Add a dowloaded file from source to target.
+    //
+    // This is similar to "AddFile", though it may require downloading an input
+    // first.
+    AddBlob {
+        path: MappedPath,
+        blob: crate::blob::Source,
+    },
+
+    // Add a package from source to target.
+    //
+    // This is similar to "AddFile", though it requires unpacking the package
+    // and re-packaging it into the target.
+    AddPackage(TargetPackage),
+}
+
+impl BuildInput {
+    fn input_path(&self) -> &Path {
+        match self {
+            BuildInput::AddDirectory(target) => &target.0,
+            BuildInput::AddFile(mapped_path) => &mapped_path.from,
+            BuildInput::AddBlob { path, .. } => &path.from,
+            BuildInput::AddPackage(target_package) => &target_package.0,
+        }
+    }
 }
 
 #[cfg(test)]

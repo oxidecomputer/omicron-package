@@ -21,12 +21,12 @@ const S3_BUCKET: &str = "https://oxide-omicron-build.s3.amazonaws.com";
 pub(crate) const BLOB: &str = "blob";
 
 #[derive(Debug)]
-pub enum Source<'a> {
-    S3(&'a PathBuf),
-    Buildomat(&'a crate::package::PrebuiltBlob),
+pub enum Source {
+    S3(PathBuf),
+    Buildomat(crate::package::PrebuiltBlob),
 }
 
-impl<'a> Source<'a> {
+impl Source {
     pub(crate) fn get_url(&self) -> String {
         match self {
             Self::S3(s) => format!("{}/{}", S3_BUCKET, s.to_string_lossy()),
@@ -90,11 +90,7 @@ impl<'a> Source<'a> {
 }
 
 // Downloads "source" from S3_BUCKET to "destination".
-pub async fn download<'a>(
-    progress: &impl Progress,
-    source: &Source<'a>,
-    destination: &Path,
-) -> Result<()> {
+pub async fn download(progress: &impl Progress, source: &Source, destination: &Path) -> Result<()> {
     let blob = destination
         .file_name()
         .ok_or_else(|| anyhow!("missing blob filename"))?;
