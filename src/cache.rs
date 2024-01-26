@@ -16,15 +16,13 @@
 //! step.
 
 use crate::input::{BuildInput, BuildInputs};
-use crate::timer;
 
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
-use blake3::{Hasher as BlakeHasher, Hash as BlakeDigest};
+use blake3::{Hash as BlakeDigest, Hasher as BlakeHasher};
 use hex::ToHex;
 use ring::digest::{Context as DigestContext, Digest as ShaDigest, SHA256};
 use serde::{Deserialize, Serialize};
-use slog::Logger;
 use std::ffi::OsString;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -34,22 +32,22 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 pub const CACHE_SUBDIRECTORY: &'static str = "manifest-cache";
 
+// The buffer size used to hash smaller files.
 const HASH_BUFFER_SIZE: usize = 16 * (1 << 10);
-const LARGE_HASH_BUFFER_SIZE: usize = 256 * (1 << 10);
+
+// When files are larger than this size, we try to hash them using techniques
+// like memory mapping and rayon.
 const LARGE_HASH_SIZE: usize = 1 << 20;
 
 /// Implemented by algorithms which can take digests of files.
 #[async_trait]
 pub trait FileDigester {
-    async fn get_digest(log: &Logger, path: &Path) -> anyhow::Result<Digest>;
+    async fn get_digest(path: &Path) -> anyhow::Result<Digest>;
 }
 
 #[async_trait]
 impl FileDigester for ShaDigest {
-    async fn get_digest(log: &Logger, path: &Path) -> anyhow::Result<Digest> {
-        let mut timer = timer::BuildTimer::new();
-        timer.start(format!("hashing (sha2): {}", path.display()));
-
+    async fn get_digest(path: &Path) -> anyhow::Result<Digest> {
         let mut reader = BufReader::new(
             tokio::fs::File::open(&path)
                 .await
@@ -70,64 +68,46 @@ impl FileDigester for ShaDigest {
         }
         let digest = context.finish().into();
 
-        timer.finish()?;
-        timer.log_all(&log);
-
         Ok(digest)
     }
 }
 
 #[async_trait]
 impl FileDigester for BlakeDigest {
-    async fn get_digest(log: &Logger, path: &Path) -> anyhow::Result<Digest> {
-        let mut timer = timer::BuildTimer::new();
+    async fn get_digest(path: &Path) -> anyhow::Result<Digest> {
         let size = path.metadata()?.len();
-        timer.start(format!("hashing (blake3): {} (size: {})", path.display(), size));
-
-        let mut reader = BufReader::new(
-            tokio::fs::File::open(&path)
-            .await
-                .with_context(|| format!("could not open {path:?}"))?,
-        );
 
         let big_digest = size >= LARGE_HASH_SIZE as u64;
         let mut hasher = BlakeHasher::new();
-        let mut heap_buffer;
-        let mut stack_buffer = [0; HASH_BUFFER_SIZE];
 
-        let mut buf = if big_digest {
-            heap_buffer = vec![0u8; LARGE_HASH_BUFFER_SIZE];
-            heap_buffer.as_mut_slice()
+        let digest = if big_digest {
+            let path = path.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                hasher.update_mmap_rayon(&path)?;
+                Ok::<Digest, anyhow::Error>(hasher.finalize().into())
+            })
+            .await??
         } else {
-            stack_buffer.as_mut_slice()
-        };
+            let mut reader = BufReader::new(
+                tokio::fs::File::open(&path)
+                    .await
+                    .with_context(|| format!("could not open {path:?}"))?,
+            );
+            let mut buf = [0; HASH_BUFFER_SIZE];
+            loop {
+                let count = reader
+                    .read(&mut buf)
+                    .await
+                    .with_context(|| format!("failed to read {path:?}"))?;
+                if count == 0 {
+                    break;
+                }
 
-        loop {
-            let count = reader
-                .read(&mut buf)
-                .await
-                .with_context(|| format!("failed to read {path:?}"))?;
-            if count == 0 {
-                break;
-            }
-
-            let chunk = &buf[..count];
-
-            if big_digest {
-                // The blake3 crate documents that this is only worth calling
-                // for "large" values, otherwise it risks being slower than
-                // simply calling "update".
-                //
-                // It mentions a ballpark "128 KiB"
-                hasher.update_rayon(chunk);
-            } else {
+                let chunk = &buf[..count];
                 hasher.update(chunk);
             }
-        }
-        let digest = hasher.finalize().into();
-
-        timer.finish()?;
-        timer.log_all(&log);
+            hasher.finalize().into()
+        };
 
         Ok(digest)
     }
@@ -163,6 +143,10 @@ struct InputMap(Vec<InputEntry>);
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct InputEntry {
     key: BuildInput,
+    // TODO: could track "mtime", or "length"? Quick alternative to "digest"?
+    // TODO: Or should I just *try* sha1??
+    //
+    // Maybe should be part of BuildInput structure?
     value: Option<Digest>,
 }
 
@@ -180,12 +164,8 @@ pub struct ArtifactManifest<D = BlakeDigest> {
 
 impl<D: FileDigester> ArtifactManifest<D> {
     /// Reads all inputs and outputs, collecting their digests.
-    pub async fn new(
-        log: &Logger,
-        inputs: &BuildInputs,
-        output_path: PathBuf,
-    ) -> anyhow::Result<Self> {
-        let result = Self::new_internal(log, inputs, output_path, None).await?;
+    pub async fn new(inputs: &BuildInputs, output_path: PathBuf) -> anyhow::Result<Self> {
+        let result = Self::new_internal(inputs, output_path, None).await?;
         Ok(result)
     }
 
@@ -195,7 +175,6 @@ impl<D: FileDigester> ArtifactManifest<D> {
     // the "cache miss" case, by allowing us to stop calculating hashes
     // as soon as we find any divergence.
     async fn new_internal(
-        log: &Logger,
         inputs: &BuildInputs,
         output_path: PathBuf,
         compare_with: Option<&Self>,
@@ -204,15 +183,21 @@ impl<D: FileDigester> ArtifactManifest<D> {
             let expected_input = compare_with.map(|manifest| &manifest.inputs.0[i]);
             async move {
                 let digest = if let Some(input_path) = input.input_path() {
-                    Some(D::get_digest(log, input_path).await?.into())
+                    Some(D::get_digest(input_path).await?.into())
                 } else {
                     None
                 };
-                let input = InputEntry { key: input.clone(), value: digest };
+                let input = InputEntry {
+                    key: input.clone(),
+                    value: digest,
+                };
 
                 if let Some(expected_input) = expected_input {
                     if *expected_input != input {
-                        CacheError::miss(format!("Differing build inputs.\nSaw {:#?}\nExpected {:#?})", input, expected_input));
+                        CacheError::miss(format!(
+                            "Differing build inputs.\nSaw {:#?}\nExpected {:#?})",
+                            input, expected_input
+                        ));
                     }
                 };
 
@@ -220,9 +205,7 @@ impl<D: FileDigester> ArtifactManifest<D> {
             }
         });
 
-        let inputs = InputMap(futures::future::try_join_all(
-            input_entry_tasks
-        ).await?);
+        let inputs = InputMap(futures::future::try_join_all(input_entry_tasks).await?);
 
         Ok(Self {
             inputs,
@@ -262,19 +245,27 @@ impl<D: FileDigester> ArtifactManifest<D> {
             Ok(f) => f,
             Err(e) => {
                 if matches!(e.kind(), std::io::ErrorKind::NotFound) {
-                    return Err(CacheError::miss(format!("File {} not found", path.display())));
+                    return Err(CacheError::miss(format!(
+                        "File {} not found",
+                        path.display()
+                    )));
                 } else {
                     return Err(anyhow!(e).into());
                 }
             }
         };
         let mut buffer = String::new();
-        f.read_to_string(&mut buffer).await.map_err(|e| anyhow!(e))?;
+        f.read_to_string(&mut buffer)
+            .await
+            .map_err(|e| anyhow!(e))?;
 
         // In the case that we cannot read the manifest, treat it as "missing".
         // This will force a rebuild anyway.
         let Ok(manifest) = serde_json::from_str(&buffer) else {
-            return Err(CacheError::miss(format!("Cannot parse manifest at {}", path.display())));
+            return Err(CacheError::miss(format!(
+                "Cannot parse manifest at {}",
+                path.display()
+            )));
         };
         Ok(manifest)
     }
@@ -287,9 +278,7 @@ pub enum CacheError {
     /// but that we should probably try to continue with package building
     /// anyway.
     #[error("Cache Miss: {reason}")]
-    CacheMiss {
-        reason: String,
-    },
+    CacheMiss { reason: String },
 
     /// Other errors, which could indicate a more fundamental problem.
     ///
@@ -327,7 +316,6 @@ impl Cache {
     /// Confirms that the artifact exists.
     pub async fn lookup(
         &self,
-        log: &Logger,
         artifact_filename: &str,
         inputs: &BuildInputs,
     ) -> Result<ArtifactManifest, CacheError> {
@@ -344,48 +332,50 @@ impl Cache {
         //
         // We'll actually validate the digests later, but this lets us bail
         // early if any files were added or removed.
-        if inputs.0.iter().ne(manifest.inputs.0.iter().map(|entry| &entry.key)) {
+        if inputs
+            .0
+            .iter()
+            .ne(manifest.inputs.0.iter().map(|entry| &entry.key))
+        {
             return Err(CacheError::miss("Set of inputs has changed"));
         }
         if artifact_path != manifest.output_path {
-            return Err(CacheError::miss(format!("Output path changed from {} -> {}", manifest.output_path.display(), artifact_path.display())));
+            return Err(CacheError::miss(format!(
+                "Output path changed from {} -> {}",
+                manifest.output_path.display(),
+                artifact_path.display()
+            )));
         }
 
         // Confirm the output file exists
         if !tokio::fs::try_exists(&artifact_path)
             .await
-            .map_err(|e| CacheError::miss(format!("Cannot locate output artifact: {e}")))? {
+            .map_err(|e| CacheError::miss(format!("Cannot locate output artifact: {e}")))?
+        {
             return Err(CacheError::miss(format!("Cannot find output artifact")));
         }
 
         // Confirm the output matches.
         let Some(observed_filename) = manifest.output_path.file_name() else {
-            return Err(CacheError::miss(
-                format!(
-                    "Missing output file name from manifest {}",
-                    manifest.output_path.display()
-                )
-            ));
+            return Err(CacheError::miss(format!(
+                "Missing output file name from manifest {}",
+                manifest.output_path.display()
+            )));
         };
         if observed_filename != artifact_filename {
-            return Err(CacheError::miss(
-                format!(
-                    "Wrong output name in manifest (saw {}, expected {})",
-                    observed_filename.to_string_lossy(),
-                    artifact_filename
-                )
-            ));
+            return Err(CacheError::miss(format!(
+                "Wrong output name in manifest (saw {}, expected {})",
+                observed_filename.to_string_lossy(),
+                artifact_filename
+            )));
         }
 
         // Finally, compare the manifests, including their digests.
         //
         // This calculation bails out early if any inputs don't match.
-        let calculated_manifest = ArtifactManifest::new_internal(
-            log,
-            inputs,
-            artifact_path.to_path_buf(),
-            Some(&manifest),
-        ).await?;
+        let calculated_manifest =
+            ArtifactManifest::new_internal(inputs, artifact_path.to_path_buf(), Some(&manifest))
+                .await?;
 
         // This is a hard stop-gap against any other differences in the
         // manifests. The error message here is worse (we don't know "why"),

@@ -4,18 +4,17 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::collections::BTreeSet;
 
 /// A directory that should be added to the target archive
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TargetDirectory(pub PathBuf);
 
 /// A package that should be added to the target archive
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TargetPackage(pub PathBuf);
 
 /// A pair of paths, mapping from a file or directory on the host to the target
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MappedPath {
     /// Source path.
     pub from: PathBuf,
@@ -24,15 +23,12 @@ pub struct MappedPath {
 }
 
 /// All possible inputs which are used to construct Omicron packages
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum BuildInput {
     /// Adds a single file, which is stored in-memory.
     ///
     /// This is mostly used as a way to cache metadata.
-    AddInMemoryFile {
-        dst_path: PathBuf,
-        contents: String,
-    },
+    AddInMemoryFile { dst_path: PathBuf, contents: String },
 
     /// Add a single directory to the target archive.
     ///
@@ -74,14 +70,11 @@ impl BuildInput {
     }
 }
 
-/// A orderd, unique collection of build inputs.
-///
-/// When referring to multiple inputs, it's important to preserve the properties
-/// of uniqueness and order for build determinism.
-pub struct BuildInputs(pub BTreeSet<BuildInput>);
+/// A ordered collection of build inputs.
+pub struct BuildInputs(pub Vec<BuildInput>);
 
 impl BuildInputs {
     pub fn new() -> Self {
-        Self(BTreeSet::new())
+        Self(vec![])
     }
 }

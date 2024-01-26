@@ -21,7 +21,7 @@ const S3_BUCKET: &str = "https://oxide-omicron-build.s3.amazonaws.com";
 // Name for the directory component where downloaded blobs are stored.
 pub(crate) const BLOB: &str = "blob";
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Source {
     S3(PathBuf),
     Buildomat(crate::package::PrebuiltBlob),

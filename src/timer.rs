@@ -103,14 +103,13 @@ impl BuildTimer {
     pub fn log_all(&self, log: &Logger) {
         for phase in self.completed() {
             let name = phase.name();
-            let s = phase.duration().as_secs();
-            let ms = phase.duration().subsec_micros();
+            let s = phase.duration().as_secs_f64();
             let label = if let Some(label) = phase.end_label() {
                 format!(" -- {label}")
             } else {
                 "".to_string()
             };
-            slog::info!(log, "Phase {name} took {s}.{ms}s{label}");
+            slog::info!(log, "Phase {name} took {s:.6}s{label}");
         }
     }
 }

@@ -82,13 +82,12 @@ pub struct ArchiveBuilder<E: Encoder> {
 
 impl<E: Encoder> ArchiveBuilder<E> {
     pub fn new(builder: tar::Builder<E>) -> Self {
-        Self {
-            builder,
-        }
+        Self { builder }
     }
 
     pub fn into_inner(self) -> Result<E> {
-        Ok(self.builder
+        Ok(self
+            .builder
             .into_inner()
             .with_context(|| "Finalizing archive")?)
     }

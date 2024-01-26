@@ -36,11 +36,13 @@ pub struct NoProgress {
 impl NoProgress {
     pub fn new() -> Self {
         Self {
-            log: slog::Logger::root(slog::Discard, slog::o!())
+            log: slog::Logger::root(slog::Discard, slog::o!()),
         }
     }
 }
 
 impl Progress for NoProgress {
-    fn get_log(&self) -> &Logger { &self.log }
+    fn get_log(&self) -> &Logger {
+        &self.log
+    }
 }
