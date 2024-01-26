@@ -2,57 +2,143 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Tracks inputs and outputs by digest to help caching
+//! Tracks inputs and outputs by digest to help caching.
+//!
+//! When a package is built, we keep track of all the inputs
+//! used to construct that package, as well as the output file
+//! name. This information is then converted into an [ArtifactManifest],
+//! which tracks the digests of all those inputs, and this manifest
+//! is written to the [CACHE_SUBDIRECTORY] within the output directory.
+//!
+//! When re-building, we can look up this manifest: if all the inputs
+//! to build a package are the same, the output should be the same, so
+//! we can use the cached output to avoid an unnecessary package construction
+//! step.
+
+use crate::input::{BuildInput, BuildInputs};
+use crate::timer;
 
 use anyhow::{anyhow, bail, Context};
+use async_trait::async_trait;
+use blake3::{Hasher as BlakeHasher, Hash as BlakeDigest};
 use hex::ToHex;
 use ring::digest::{Context as DigestContext, Digest as ShaDigest, SHA256};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use slog::Logger;
+use std::ffi::OsString;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
-// The cache is stored in the output directory, with the following convention:
-//
-// out/cache/<artifact name>.json
-//
-// XXX do we need to differentiate by target?
+pub const CACHE_SUBDIRECTORY: &'static str = "manifest-cache";
 
-// Calculates the SHA256 digest for a file.
-async fn get_sha256_digest(path: &PathBuf) -> anyhow::Result<ShaDigest> {
-    let mut reader = BufReader::new(
-        tokio::fs::File::open(&path)
-            .await
-            .with_context(|| format!("could not open {path:?}"))?,
-    );
-    let mut context = DigestContext::new(&SHA256);
-    let mut buffer = [0; 1024];
+const HASH_BUFFER_SIZE: usize = 16 * (1 << 10);
+const LARGE_HASH_BUFFER_SIZE: usize = 256 * (1 << 10);
+const LARGE_HASH_SIZE: usize = 1 << 20;
 
-    loop {
-        let count = reader
-            .read(&mut buffer)
-            .await
-            .with_context(|| format!("failed to read {path:?}"))?;
-        if count == 0 {
-            break;
-        } else {
-            context.update(&buffer[..count]);
-        }
-    }
-    Ok(context.finish())
+/// Implemented by algorithms which can take digests of files.
+#[async_trait]
+pub trait FileDigester {
+    async fn get_digest(log: &Logger, path: &Path) -> anyhow::Result<Digest>;
 }
 
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
-enum Digest {
+#[async_trait]
+impl FileDigester for ShaDigest {
+    async fn get_digest(log: &Logger, path: &Path) -> anyhow::Result<Digest> {
+        let mut timer = timer::BuildTimer::new();
+        timer.start(format!("hashing (sha2): {}", path.display()));
+
+        let mut reader = BufReader::new(
+            tokio::fs::File::open(&path)
+                .await
+                .with_context(|| format!("could not open {path:?}"))?,
+        );
+        let mut context = DigestContext::new(&SHA256);
+        let mut buffer = [0; HASH_BUFFER_SIZE];
+        loop {
+            let count = reader
+                .read(&mut buffer)
+                .await
+                .with_context(|| format!("failed to read {path:?}"))?;
+            if count == 0 {
+                break;
+            } else {
+                context.update(&buffer[..count]);
+            }
+        }
+        let digest = context.finish().into();
+
+        timer.finish()?;
+        timer.log_all(&log);
+
+        Ok(digest)
+    }
+}
+
+#[async_trait]
+impl FileDigester for BlakeDigest {
+    async fn get_digest(log: &Logger, path: &Path) -> anyhow::Result<Digest> {
+        let mut timer = timer::BuildTimer::new();
+        let size = path.metadata()?.len();
+        timer.start(format!("hashing (blake3): {} (size: {})", path.display(), size));
+
+        let mut reader = BufReader::new(
+            tokio::fs::File::open(&path)
+            .await
+                .with_context(|| format!("could not open {path:?}"))?,
+        );
+
+        let big_digest = size >= LARGE_HASH_SIZE as u64;
+        let mut hasher = BlakeHasher::new();
+        let mut heap_buffer;
+        let mut stack_buffer = [0; HASH_BUFFER_SIZE];
+
+        let mut buf = if big_digest {
+            heap_buffer = vec![0u8; LARGE_HASH_BUFFER_SIZE];
+            heap_buffer.as_mut_slice()
+        } else {
+            stack_buffer.as_mut_slice()
+        };
+
+        loop {
+            let count = reader
+                .read(&mut buf)
+                .await
+                .with_context(|| format!("failed to read {path:?}"))?;
+            if count == 0 {
+                break;
+            }
+
+            let chunk = &buf[..count];
+
+            if big_digest {
+                // The blake3 crate documents that this is only worth calling
+                // for "large" values, otherwise it risks being slower than
+                // simply calling "update".
+                //
+                // It mentions a ballpark "128 KiB"
+                hasher.update_rayon(chunk);
+            } else {
+                hasher.update(chunk);
+            }
+        }
+        let digest = hasher.finalize().into();
+
+        timer.finish()?;
+        timer.log_all(&log);
+
+        Ok(digest)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Digest {
     // Sha256 support, as a hex-encoded string.
     Sha2(String),
-    // I'd be interested in adding blake3 support someday, but I don't *love*
-    // the idea of diverging from our TUF repos, which are currently SHA2.
-    //
-    // blake3 would be faster though!
+    // Blake3 support, as a hex-encoded string.
+    Blake3(String),
 }
 
 impl From<ShaDigest> for Digest {
@@ -61,33 +147,87 @@ impl From<ShaDigest> for Digest {
     }
 }
 
-pub type Inputs = Vec<PathBuf>;
+impl From<BlakeDigest> for Digest {
+    fn from(digest: BlakeDigest) -> Self {
+        Self::Blake3(digest.as_bytes().encode_hex::<String>())
+    }
+}
+
+pub type Inputs = Vec<BuildInput>;
+
+// It's not actually a map, because serde doesn't like enum keys.
+// But this is logically a "BTreeMap".
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+struct InputMap(Vec<InputEntry>);
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct InputEntry {
+    key: BuildInput,
+    value: Option<Digest>,
+}
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactManifest {
+pub struct ArtifactManifest<D = BlakeDigest> {
     // All inputs, which create this artifact
-    inputs: BTreeMap<PathBuf, Digest>,
+    inputs: InputMap,
 
     // Output, created by this artifact
     output_path: PathBuf,
-    output_digest: Digest,
+
+    // Which digest is being used?
+    phantom: PhantomData<D>,
 }
 
-impl ArtifactManifest {
+impl<D: FileDigester> ArtifactManifest<D> {
     /// Reads all inputs and outputs, collecting their digests.
-    pub async fn new_sha256(input_paths: Inputs, output_path: PathBuf) -> anyhow::Result<Self> {
-        let mut inputs = BTreeMap::new();
+    pub async fn new(
+        log: &Logger,
+        inputs: &BuildInputs,
+        output_path: PathBuf,
+    ) -> anyhow::Result<Self> {
+        let result = Self::new_internal(log, inputs, output_path, None).await?;
+        Ok(result)
+    }
 
-        for input_path in input_paths {
-            let digest = get_sha256_digest(&input_path).await?.into();
-            inputs.insert(input_path, digest);
-        }
-        let output_digest = get_sha256_digest(&output_path).await?.into();
+    // If the optional "compare_with" field is supplied, construction
+    // of the ArtifactManifest exits early if any of the inputs are not
+    // equal to the digests found in "compare_with". This helps improve
+    // the "cache miss" case, by allowing us to stop calculating hashes
+    // as soon as we find any divergence.
+    async fn new_internal(
+        log: &Logger,
+        inputs: &BuildInputs,
+        output_path: PathBuf,
+        compare_with: Option<&Self>,
+    ) -> Result<Self, CacheError> {
+        let input_entry_tasks = inputs.0.iter().cloned().enumerate().map(|(i, input)| {
+            let expected_input = compare_with.map(|manifest| &manifest.inputs.0[i]);
+            async move {
+                let digest = if let Some(input_path) = input.input_path() {
+                    Some(D::get_digest(log, input_path).await?.into())
+                } else {
+                    None
+                };
+                let input = InputEntry { key: input.clone(), value: digest };
+
+                if let Some(expected_input) = expected_input {
+                    if *expected_input != input {
+                        CacheError::miss(format!("Differing build inputs.\nSaw {:#?}\nExpected {:#?})", input, expected_input));
+                    }
+                };
+
+                Ok::<_, CacheError>(input)
+            }
+        });
+
+        let inputs = InputMap(futures::future::try_join_all(
+            input_entry_tasks
+        ).await?);
 
         Ok(Self {
             inputs,
             output_path,
-            output_digest,
+            phantom: PhantomData,
         })
     }
 
@@ -99,53 +239,71 @@ impl ArtifactManifest {
         if extension != "json" {
             bail!("JSON encoding is all we know. Write to a '.json' file?");
         }
+        let serialized = serde_json::to_string(&self)
+            .with_context(|| "Failed to serialize ArtifactManifest to JSON")?;
+
         let mut f = File::create(path).await?;
-        f.write_all(serde_json::to_string(&self)?.as_bytes())
-            .await?;
+        f.write_all(serialized.as_bytes()).await?;
         Ok(())
     }
 
     // Reads a manifest file to a particular location.
     //
     // Does not validate whether or not any corresponding artifacts exist.
-    //
-    // NOTE: It would probably be worth embedding this notion of "not validated"
-    // into the type system?
-    async fn read_from(path: &PathBuf) -> anyhow::Result<Option<Self>> {
+    async fn read_from(path: &PathBuf) -> Result<Self, CacheError> {
         let Some(extension) = path.extension() else {
-            bail!("Missing extension?");
+            return Err(anyhow!("Missing extension?").into());
         };
         if extension != "json" {
-            bail!("JSON encoding is all we know. Read from a '.json' file?");
+            return Err(anyhow!("JSON encoding is all we know. Read from a '.json' file?").into());
         }
 
         let mut f = match File::open(path).await {
             Ok(f) => f,
             Err(e) => {
                 if matches!(e.kind(), std::io::ErrorKind::NotFound) {
-                    return Ok(None);
+                    return Err(CacheError::miss(format!("File {} not found", path.display())));
                 } else {
-                    bail!(e);
+                    return Err(anyhow!(e).into());
                 }
             }
         };
         let mut buffer = String::new();
-        f.read_to_string(&mut buffer).await?;
+        f.read_to_string(&mut buffer).await.map_err(|e| anyhow!(e))?;
 
-        Ok(Some(serde_json::from_str(&buffer)?))
+        // In the case that we cannot read the manifest, treat it as "missing".
+        // This will force a rebuild anyway.
+        let Ok(manifest) = serde_json::from_str(&buffer) else {
+            return Err(CacheError::miss(format!("Cannot parse manifest at {}", path.display())));
+        };
+        Ok(manifest)
     }
 }
 
+/// Errors that can be returned when looking up cached artifacts.
 #[derive(Error, Debug)]
 pub enum CacheError {
-    #[error("Cache Corrupted: {reason}\nDelete the directory at {cache_directory}")]
-    Corrupted {
-        cache_directory: PathBuf,
+    /// Identifies that cache lookup has failed, for a wide number of reasons,
+    /// but that we should probably try to continue with package building
+    /// anyway.
+    #[error("Cache Miss: {reason}")]
+    CacheMiss {
         reason: String,
     },
 
+    /// Other errors, which could indicate a more fundamental problem.
+    ///
+    /// These errors encourage callers to exit immediately, rather than
+    /// treating the failure like a "miss".
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl CacheError {
+    // Convenience wrapper
+    fn miss<T: Into<String>>(t: T) -> Self {
+        CacheError::CacheMiss { reason: t.into() }
+    }
 }
 
 pub struct Cache {
@@ -156,7 +314,7 @@ pub struct Cache {
 impl Cache {
     /// Ensures the cache directory exists within the output directory
     pub async fn new(output_directory: &Path) -> anyhow::Result<Self> {
-        let cache_directory = output_directory.join("manifest-cache");
+        let cache_directory = output_directory.join(CACHE_SUBDIRECTORY);
         tokio::fs::create_dir_all(&cache_directory).await?;
         Ok(Self {
             output_directory: output_directory.to_path_buf(),
@@ -169,67 +327,81 @@ impl Cache {
     /// Confirms that the artifact exists.
     pub async fn lookup(
         &self,
-        artifact_filename: &OsStr,
-    ) -> Result<Option<ArtifactManifest>, CacheError> {
+        log: &Logger,
+        artifact_filename: &str,
+        inputs: &BuildInputs,
+    ) -> Result<ArtifactManifest, CacheError> {
         let mut manifest_filename = OsString::from(artifact_filename);
         manifest_filename.push(".json");
 
         let manifest_path = self.cache_directory.join(manifest_filename);
         let artifact_path = self.output_directory.join(artifact_filename);
 
-        let Some(manifest) = ArtifactManifest::read_from(&manifest_path)
-            .await
-            .with_context(|| format!("Could not lookup {} in cache", manifest_path.display()))?
-        else {
-            return Ok(None);
-        };
+        // Look up the manifest file in the cache
+        let manifest = ArtifactManifest::read_from(&manifest_path).await?;
 
-        // TODO:
-        // - ArtifactManifest::new_sha256(manifest.input_paths, manifest.output_path)
+        // Do a quick check if the input files are different.
         //
-        // - This would give us a new manifest we could compare with the
-        // original? See if anything has changed?
-        //
-        // - but we ALSO need to see if the set of inputs has changed. Need to
-        // walk the spots where we could add inputs AHEAD of time
-        //
-        // - As an optimization, we could do the following:
-        //   - Check for the set of inputs/outputs (before hashing anything)
-        //   - If eq, THEN hash one-by-one checking for equality of inputs
-        //   - ... do we actually *need* to hash the output at all? We could,
-        //   to verify the build is deterministic from the inputs?
-
-        tokio::fs::try_exists(&artifact_path)
-            .await
-            .map_err(|e| CacheError::Corrupted {
-                cache_directory: self.cache_directory.clone(),
-                reason: format!("Manifest exists, but artifact doesn't: {e}"),
-            })?;
-
-        let Some(observed_filename) = manifest.output_path.file_name() else {
-            return Err(CacheError::Corrupted {
-                cache_directory: self.cache_directory.clone(),
-                reason: format!(
-                    "Missing output file name from manifest {}",
-                    manifest.output_path.display()
-                ),
-            });
-        };
-        if observed_filename != artifact_filename {
-            return Err(CacheError::Corrupted {
-                cache_directory: self.cache_directory.clone(),
-                reason: format!(
-                    "Wrong output name in manifest (saw {}, expected {})",
-                    observed_filename.to_string_lossy(),
-                    artifact_filename.to_string_lossy()
-                ),
-            });
+        // We'll actually validate the digests later, but this lets us bail
+        // early if any files were added or removed.
+        if inputs.0.iter().ne(manifest.inputs.0.iter().map(|entry| &entry.key)) {
+            return Err(CacheError::miss("Set of inputs has changed"));
+        }
+        if artifact_path != manifest.output_path {
+            return Err(CacheError::miss(format!("Output path changed from {} -> {}", manifest.output_path.display(), artifact_path.display())));
         }
 
-        Ok(Some(manifest))
+        // Confirm the output file exists
+        if !tokio::fs::try_exists(&artifact_path)
+            .await
+            .map_err(|e| CacheError::miss(format!("Cannot locate output artifact: {e}")))? {
+            return Err(CacheError::miss(format!("Cannot find output artifact")));
+        }
+
+        // Confirm the output matches.
+        let Some(observed_filename) = manifest.output_path.file_name() else {
+            return Err(CacheError::miss(
+                format!(
+                    "Missing output file name from manifest {}",
+                    manifest.output_path.display()
+                )
+            ));
+        };
+        if observed_filename != artifact_filename {
+            return Err(CacheError::miss(
+                format!(
+                    "Wrong output name in manifest (saw {}, expected {})",
+                    observed_filename.to_string_lossy(),
+                    artifact_filename
+                )
+            ));
+        }
+
+        // Finally, compare the manifests, including their digests.
+        //
+        // This calculation bails out early if any inputs don't match.
+        let calculated_manifest = ArtifactManifest::new_internal(
+            log,
+            inputs,
+            artifact_path.to_path_buf(),
+            Some(&manifest),
+        ).await?;
+
+        // This is a hard stop-gap against any other differences in the
+        // manifests. The error message here is worse (we don't know "why"),
+        // but it's a quick check that's protective.
+        if calculated_manifest != manifest {
+            return Err(CacheError::miss("Manifests appear different"));
+        }
+
+        Ok(manifest)
     }
 
     /// Updates an artifact's entry within the cache
+    //
+    // TODO: Don't take ArtifactManifest as input
+    // TODO: Re-create it. This means "cache no-op" options can be a cache
+    // parameter.
     pub async fn update(&self, manifest: &ArtifactManifest) -> Result<(), CacheError> {
         let Some(artifact_filename) = manifest.output_path.file_name() else {
             return Err(anyhow!("Bad manifest: Missing output name").into());

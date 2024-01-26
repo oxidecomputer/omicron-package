@@ -9,6 +9,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
 use ring::digest::{Context as DigestContext, Digest, SHA256};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -20,7 +21,7 @@ const S3_BUCKET: &str = "https://oxide-omicron-build.s3.amazonaws.com";
 // Name for the directory component where downloaded blobs are stored.
 pub(crate) const BLOB: &str = "blob";
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum Source {
     S3(PathBuf),
     Buildomat(crate::package::PrebuiltBlob),
@@ -130,7 +131,7 @@ pub async fn download(progress: &impl Progress, source: &Source, destination: &P
     let blob_progress = if let Some(length) = content_length {
         progress.sub_progress(length)
     } else {
-        Box::new(NoProgress)
+        Box::new(NoProgress::new())
     };
     blob_progress.set_message(blob.to_string_lossy().into_owned().into());
 
@@ -138,7 +139,7 @@ pub async fn download(progress: &impl Progress, source: &Source, destination: &P
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         file.write_all(&chunk).await?;
-        blob_progress.increment(chunk.len() as u64);
+        blob_progress.increment_completed(chunk.len() as u64);
     }
     drop(blob_progress);
 
