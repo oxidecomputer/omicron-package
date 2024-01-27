@@ -15,7 +15,7 @@ mod test {
     use omicron_zone_package::blob::download;
     use omicron_zone_package::progress::NoProgress;
 
-    fn get_next<'a, R: 'a + Read>(entries: &mut tar::Entries<'a, R>) -> PathBuf {
+    fn get_next_path<'a, R: 'a + Read>(entries: &mut tar::Entries<'a, R>) -> PathBuf {
         entries
             .next()
             .unwrap()
@@ -23,6 +23,10 @@ mod test {
             .path()
             .unwrap()
             .into_owned()
+    }
+
+    fn get_next_entry<'a, R: 'a + Read>(entries: &mut tar::Entries<'a, R>) -> tar::Entry<'a, R> {
+        entries.next().unwrap().unwrap()
     }
 
     // Tests a package of arbitrary files is being placed into a Zone image
@@ -46,22 +50,28 @@ mod test {
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
         let mut ents = archive.entries().unwrap();
-        assert_eq!(Path::new("oxide.json"), get_next(&mut ents));
-        assert_eq!(Path::new("root/"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next(&mut ents));
+        assert_eq!(Path::new("oxide.json"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut ents));
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service"),
+            get_next_path(&mut ents)
+        );
         assert_eq!(
             Path::new("root/opt/oxide/my-service/contents.txt"),
-            get_next(&mut ents)
+            get_next_path(&mut ents)
         );
-        assert_eq!(Path::new("root/"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next(&mut ents));
+        assert_eq!(Path::new("root/"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut ents));
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service"),
+            get_next_path(&mut ents)
+        );
         assert_eq!(
             Path::new("root/opt/oxide/my-service/single-file.txt"),
-            get_next(&mut ents)
+            get_next_path(&mut ents)
         );
         assert!(ents.next().is_none());
     }
@@ -87,26 +97,32 @@ mod test {
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
         let mut ents = archive.entries().unwrap();
-        assert_eq!(Path::new("oxide.json"), get_next(&mut ents));
-        assert_eq!(Path::new("root/"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next(&mut ents));
+        assert_eq!(Path::new("oxide.json"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut ents));
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service"),
+            get_next_path(&mut ents)
+        );
         assert_eq!(
             Path::new("root/opt/oxide/my-service/contents.txt"),
-            get_next(&mut ents)
+            get_next_path(&mut ents)
         );
-        assert_eq!(Path::new("root/"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide/my-service"), get_next(&mut ents));
+        assert_eq!(Path::new("root/"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut ents));
+        assert_eq!(
+            Path::new("root/opt/oxide/my-service"),
+            get_next_path(&mut ents)
+        );
         assert_eq!(
             Path::new("root/opt/oxide/my-service/bin"),
-            get_next(&mut ents)
+            get_next_path(&mut ents)
         );
         assert_eq!(
             Path::new("root/opt/oxide/my-service/bin/test-service"),
-            get_next(&mut ents)
+            get_next_path(&mut ents)
         );
         assert!(ents.next().is_none());
     }
@@ -134,8 +150,32 @@ mod test {
         assert!(path.exists());
         let mut archive = Archive::new(File::open(path).unwrap());
         let mut ents = archive.entries().unwrap();
-        assert_eq!(Path::new("test-service"), get_next(&mut ents));
-        assert_eq!(Path::new("VERSION"), get_next(&mut ents));
+        let mut entry = get_next_entry(&mut ents);
+        assert_eq!(Path::new("VERSION"), entry.path().unwrap());
+        let mut s = String::new();
+        entry.read_to_string(&mut s).unwrap();
+        assert_eq!(s, "0.0.0");
+
+        assert_eq!(Path::new("test-service"), get_next_path(&mut ents));
+        assert!(ents.next().is_none());
+
+        // Try stamping it, verify the contents again
+        let expected_semver = semver::Version::new(3, 3, 3);
+        let path = package
+            .stamp(package_name, &out.path(), &expected_semver)
+            .await
+            .unwrap();
+        assert!(path.exists());
+        let mut archive = Archive::new(File::open(path).unwrap());
+        let mut ents = archive.entries().unwrap();
+        assert_eq!(Path::new("./"), get_next_path(&mut ents));
+        assert_eq!(Path::new("test-service"), get_next_path(&mut ents));
+        let mut entry = get_next_entry(&mut ents);
+        assert_eq!(Path::new("VERSION"), entry.path().unwrap());
+        s.clear();
+        entry.read_to_string(&mut s).unwrap();
+        assert_eq!(s, expected_semver.to_string());
+
         assert!(ents.next().is_none());
     }
 
@@ -143,7 +183,7 @@ mod test {
     // not *need* to be the same. This is an example of them both
     // being explicitly different.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_rust_package_with_disinct_service_name() {
+    async fn test_rust_package_with_distinct_service_name() {
         // Parse the configuration
         let cfg = config::parse("tests/service-d/cfg.toml").unwrap();
         let package_name = "my-package";
@@ -164,8 +204,8 @@ mod test {
         assert!(path.exists());
         let mut archive = Archive::new(File::open(path).unwrap());
         let mut ents = archive.entries().unwrap();
-        assert_eq!(Path::new("test-service"), get_next(&mut ents));
-        assert_eq!(Path::new("VERSION"), get_next(&mut ents));
+        assert_eq!(Path::new("VERSION"), get_next_path(&mut ents));
+        assert_eq!(Path::new("test-service"), get_next_path(&mut ents));
         assert!(ents.next().is_none());
     }
 
@@ -209,29 +249,32 @@ mod test {
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
         let mut ents = archive.entries().unwrap();
-        assert_eq!(Path::new("oxide.json"), get_next(&mut ents));
-        assert_eq!(Path::new("root/"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
+        assert_eq!(Path::new("oxide.json"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut ents));
         assert_eq!(
             Path::new("root/opt/oxide/pkg-1-file.txt"),
-            get_next(&mut ents)
+            get_next_path(&mut ents)
         );
-        assert_eq!(Path::new("root/"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
+        assert_eq!(Path::new("root/"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut ents));
         assert_eq!(
             Path::new("root/opt/oxide/pkg-2-file.txt"),
-            get_next(&mut ents)
+            get_next_path(&mut ents)
         );
-        assert_eq!(Path::new("root/"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide/svc-2"), get_next(&mut ents));
-        assert_eq!(Path::new("root/opt/oxide/svc-2/bin"), get_next(&mut ents));
+        assert_eq!(Path::new("root/"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide"), get_next_path(&mut ents));
+        assert_eq!(Path::new("root/opt/oxide/svc-2"), get_next_path(&mut ents));
+        assert_eq!(
+            Path::new("root/opt/oxide/svc-2/bin"),
+            get_next_path(&mut ents)
+        );
         assert_eq!(
             Path::new("root/opt/oxide/svc-2/bin/test-service"),
-            get_next(&mut ents)
+            get_next_path(&mut ents)
         );
         assert!(ents.next().is_none());
     }
@@ -241,11 +284,11 @@ mod test {
         let out = tempfile::tempdir()?;
 
         let path = PathBuf::from("OVMF_CODE.fd");
-        let src = omicron_zone_package::blob::Source::S3(&path);
+        let src = omicron_zone_package::blob::Source::S3(path.clone());
         let dst = out.path().join(&path);
 
-        download(&NoProgress, &src, &dst).await?;
-        download(&NoProgress, &src, &dst).await?;
+        download(&NoProgress::new(), &src, &dst).await?;
+        download(&NoProgress::new(), &src, &dst).await?;
 
         Ok(())
     }

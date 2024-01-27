@@ -37,6 +37,8 @@ const HASH_BUFFER_SIZE: usize = 16 * (1 << 10);
 
 // When files are larger than this size, we try to hash them using techniques
 // like memory mapping and rayon.
+//
+// NOTE: This is currently only blake3-specific.
 const LARGE_HASH_SIZE: usize = 1 << 20;
 
 /// Implemented by algorithms which can take digests of files.

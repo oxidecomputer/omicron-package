@@ -750,7 +750,6 @@ impl Package {
             .with_context(|| "Identifying all input paths")?;
         progress.increment_total(inputs.0.len() as u64);
 
-        let log = progress.get_log();
         match cache.lookup(&output_file, &inputs).await {
             Ok(_) => {
                 progress.set_message("Cache hit".into());
@@ -773,10 +772,6 @@ impl Package {
             self.add_input_to_package(progress, &mut archive, &input)
                 .await?;
         }
-
-        // Add a placeholder version stamp
-        self.add_stamp_to_tarball_package(&mut archive.builder, &DEFAULT_VERSION)
-            .await?;
 
         let file = archive
             .builder
