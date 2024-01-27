@@ -15,125 +15,18 @@
 //! we can use the cached output to avoid an unnecessary package construction
 //! step.
 
+use crate::digest::{DefaultDigest, Digest, FileDigester};
 use crate::input::{BuildInput, BuildInputs};
 
 use anyhow::{anyhow, bail, Context};
-use async_trait::async_trait;
-use blake3::{Hash as BlakeDigest, Hasher as BlakeHasher};
-use hex::ToHex;
-use ring::digest::{Context as DigestContext, Digest as ShaDigest, SHA256};
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
 use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub const CACHE_SUBDIRECTORY: &'static str = "manifest-cache";
-
-// The buffer size used to hash smaller files.
-const HASH_BUFFER_SIZE: usize = 16 * (1 << 10);
-
-// When files are larger than this size, we try to hash them using techniques
-// like memory mapping and rayon.
-//
-// NOTE: This is currently only blake3-specific.
-const LARGE_HASH_SIZE: usize = 1 << 20;
-
-/// Implemented by algorithms which can take digests of files.
-#[async_trait]
-pub trait FileDigester {
-    async fn get_digest(path: &Path) -> anyhow::Result<Digest>;
-}
-
-#[async_trait]
-impl FileDigester for ShaDigest {
-    async fn get_digest(path: &Path) -> anyhow::Result<Digest> {
-        let mut reader = BufReader::new(
-            tokio::fs::File::open(&path)
-                .await
-                .with_context(|| format!("could not open {path:?}"))?,
-        );
-        let mut context = DigestContext::new(&SHA256);
-        let mut buffer = [0; HASH_BUFFER_SIZE];
-        loop {
-            let count = reader
-                .read(&mut buffer)
-                .await
-                .with_context(|| format!("failed to read {path:?}"))?;
-            if count == 0 {
-                break;
-            } else {
-                context.update(&buffer[..count]);
-            }
-        }
-        let digest = context.finish().into();
-
-        Ok(digest)
-    }
-}
-
-#[async_trait]
-impl FileDigester for BlakeDigest {
-    async fn get_digest(path: &Path) -> anyhow::Result<Digest> {
-        let size = path.metadata()?.len();
-
-        let big_digest = size >= LARGE_HASH_SIZE as u64;
-        let mut hasher = BlakeHasher::new();
-
-        let digest = if big_digest {
-            let path = path.to_path_buf();
-            tokio::task::spawn_blocking(move || {
-                hasher.update_mmap_rayon(&path)?;
-                Ok::<Digest, anyhow::Error>(hasher.finalize().into())
-            })
-            .await??
-        } else {
-            let mut reader = BufReader::new(
-                tokio::fs::File::open(&path)
-                    .await
-                    .with_context(|| format!("could not open {path:?}"))?,
-            );
-            let mut buf = [0; HASH_BUFFER_SIZE];
-            loop {
-                let count = reader
-                    .read(&mut buf)
-                    .await
-                    .with_context(|| format!("failed to read {path:?}"))?;
-                if count == 0 {
-                    break;
-                }
-
-                let chunk = &buf[..count];
-                hasher.update(chunk);
-            }
-            hasher.finalize().into()
-        };
-
-        Ok(digest)
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Digest {
-    // Sha256 support, as a hex-encoded string.
-    Sha2(String),
-    // Blake3 support, as a hex-encoded string.
-    Blake3(String),
-}
-
-impl From<ShaDigest> for Digest {
-    fn from(digest: ShaDigest) -> Self {
-        Self::Sha2(digest.as_ref().encode_hex::<String>())
-    }
-}
-
-impl From<BlakeDigest> for Digest {
-    fn from(digest: BlakeDigest) -> Self {
-        Self::Blake3(digest.as_bytes().encode_hex::<String>())
-    }
-}
+pub const CACHE_SUBDIRECTORY: &str = "manifest-cache";
 
 pub type Inputs = Vec<BuildInput>;
 
@@ -146,19 +39,18 @@ struct InputMap(Vec<InputEntry>);
 struct InputEntry {
     key: BuildInput,
     // TODO: could track "mtime", or "length"? Quick alternative to "digest"?
-    // TODO: Or should I just *try* sha1??
     //
     // Maybe should be part of BuildInput structure?
     value: Option<Digest>,
 }
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactManifest<D = BlakeDigest> {
+pub struct ArtifactManifest<D = DefaultDigest> {
     // All inputs, which create this artifact
     inputs: InputMap,
 
     // Output, created by this artifact
-    output_path: PathBuf,
+    output_path: Utf8PathBuf,
 
     // Which digest is being used?
     phantom: PhantomData<D>,
@@ -166,7 +58,7 @@ pub struct ArtifactManifest<D = BlakeDigest> {
 
 impl<D: FileDigester> ArtifactManifest<D> {
     /// Reads all inputs and outputs, collecting their digests.
-    pub async fn new(inputs: &BuildInputs, output_path: PathBuf) -> anyhow::Result<Self> {
+    pub async fn new(inputs: &BuildInputs, output_path: Utf8PathBuf) -> anyhow::Result<Self> {
         let result = Self::new_internal(inputs, output_path, None).await?;
         Ok(result)
     }
@@ -178,14 +70,14 @@ impl<D: FileDigester> ArtifactManifest<D> {
     // as soon as we find any divergence.
     async fn new_internal(
         inputs: &BuildInputs,
-        output_path: PathBuf,
+        output_path: Utf8PathBuf,
         compare_with: Option<&Self>,
     ) -> Result<Self, CacheError> {
         let input_entry_tasks = inputs.0.iter().cloned().enumerate().map(|(i, input)| {
             let expected_input = compare_with.map(|manifest| &manifest.inputs.0[i]);
             async move {
                 let digest = if let Some(input_path) = input.input_path() {
-                    Some(D::get_digest(input_path).await?.into())
+                    Some(D::get_digest(input_path).await?)
                 } else {
                     None
                 };
@@ -217,7 +109,7 @@ impl<D: FileDigester> ArtifactManifest<D> {
     }
 
     // Writes a manifest file to a particular location.
-    async fn write_to(&self, path: &PathBuf) -> anyhow::Result<()> {
+    async fn write_to(&self, path: &Utf8PathBuf) -> anyhow::Result<()> {
         let Some(extension) = path.extension() else {
             bail!("Missing extension?");
         };
@@ -235,7 +127,7 @@ impl<D: FileDigester> ArtifactManifest<D> {
     // Reads a manifest file to a particular location.
     //
     // Does not validate whether or not any corresponding artifacts exist.
-    async fn read_from(path: &PathBuf) -> Result<Self, CacheError> {
+    async fn read_from(path: &Utf8PathBuf) -> Result<Self, CacheError> {
         let Some(extension) = path.extension() else {
             return Err(anyhow!("Missing extension?").into());
         };
@@ -247,10 +139,7 @@ impl<D: FileDigester> ArtifactManifest<D> {
             Ok(f) => f,
             Err(e) => {
                 if matches!(e.kind(), std::io::ErrorKind::NotFound) {
-                    return Err(CacheError::miss(format!(
-                        "File {} not found",
-                        path.display()
-                    )));
+                    return Err(CacheError::miss(format!("File {} not found", path)));
                 } else {
                     return Err(anyhow!(e).into());
                 }
@@ -266,7 +155,7 @@ impl<D: FileDigester> ArtifactManifest<D> {
         let Ok(manifest) = serde_json::from_str(&buffer) else {
             return Err(CacheError::miss(format!(
                 "Cannot parse manifest at {}",
-                path.display()
+                path
             )));
         };
         Ok(manifest)
@@ -298,13 +187,13 @@ impl CacheError {
 }
 
 pub struct Cache {
-    output_directory: PathBuf,
-    cache_directory: PathBuf,
+    output_directory: Utf8PathBuf,
+    cache_directory: Utf8PathBuf,
 }
 
 impl Cache {
     /// Ensures the cache directory exists within the output directory
-    pub async fn new(output_directory: &Path) -> anyhow::Result<Self> {
+    pub async fn new(output_directory: &Utf8Path) -> anyhow::Result<Self> {
         let cache_directory = output_directory.join(CACHE_SUBDIRECTORY);
         tokio::fs::create_dir_all(&cache_directory).await?;
         Ok(Self {
@@ -321,8 +210,8 @@ impl Cache {
         artifact_filename: &str,
         inputs: &BuildInputs,
     ) -> Result<ArtifactManifest, CacheError> {
-        let mut manifest_filename = OsString::from(artifact_filename);
-        manifest_filename.push(".json");
+        let mut manifest_filename = String::from(artifact_filename);
+        manifest_filename.push_str(".json");
 
         let manifest_path = self.cache_directory.join(manifest_filename);
         let artifact_path = self.output_directory.join(artifact_filename);
@@ -344,8 +233,7 @@ impl Cache {
         if artifact_path != manifest.output_path {
             return Err(CacheError::miss(format!(
                 "Output path changed from {} -> {}",
-                manifest.output_path.display(),
-                artifact_path.display()
+                manifest.output_path, artifact_path,
             )));
         }
 
@@ -354,21 +242,20 @@ impl Cache {
             .await
             .map_err(|e| CacheError::miss(format!("Cannot locate output artifact: {e}")))?
         {
-            return Err(CacheError::miss(format!("Cannot find output artifact")));
+            return Err(CacheError::miss("Cannot find output artifact"));
         }
 
         // Confirm the output matches.
         let Some(observed_filename) = manifest.output_path.file_name() else {
             return Err(CacheError::miss(format!(
                 "Missing output file name from manifest {}",
-                manifest.output_path.display()
+                manifest.output_path
             )));
         };
         if observed_filename != artifact_filename {
             return Err(CacheError::miss(format!(
                 "Wrong output name in manifest (saw {}, expected {})",
-                observed_filename.to_string_lossy(),
-                artifact_filename
+                observed_filename, artifact_filename
             )));
         }
 
@@ -399,8 +286,8 @@ impl Cache {
             return Err(anyhow!("Bad manifest: Missing output name").into());
         };
 
-        let mut manifest_filename = OsString::from(artifact_filename);
-        manifest_filename.push(".json");
+        let mut manifest_filename = String::from(artifact_filename);
+        manifest_filename.push_str(".json");
         let manifest_path = self.cache_directory.join(manifest_filename);
         manifest.write_to(&manifest_path).await?;
 

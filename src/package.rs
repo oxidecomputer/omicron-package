@@ -16,11 +16,12 @@ use crate::target::Target;
 use crate::timer::BuildTimer;
 
 use anyhow::{anyhow, bail, Context, Result};
+use camino::{Utf8Path, Utf8PathBuf};
 use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
 use std::fs::File;
-use std::path::{Path, PathBuf};
 use tar::Builder;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -29,9 +30,9 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 //
 // Example:
 // - /opt/oxide -> root/opt/oxide
-fn zone_archive_path(path: &Path) -> Result<PathBuf> {
+fn zone_archive_path(path: &Utf8Path) -> Result<Utf8PathBuf> {
     let leading_slash = std::path::MAIN_SEPARATOR.to_string();
-    Ok(Path::new("root").join(path.strip_prefix(leading_slash)?))
+    Ok(Utf8Path::new("root").join(path.strip_prefix(leading_slash)?))
 }
 
 // Adds all parent directories of a path to the archive.
@@ -46,15 +47,12 @@ fn zone_archive_path(path: &Path) -> Result<PathBuf> {
 // - /root/opt
 // - /root/opt/oxide
 // - /root/opt/oxide/foo
-fn zone_get_all_parent_inputs(to: &Path) -> Result<Vec<TargetDirectory>> {
-    let mut parents: Vec<&Path> = to.ancestors().collect::<Vec<&Path>>();
+fn zone_get_all_parent_inputs(to: &Utf8Path) -> Result<Vec<TargetDirectory>> {
+    let mut parents: Vec<&Utf8Path> = to.ancestors().collect::<Vec<&Utf8Path>>();
     parents.reverse();
 
     if to.is_relative() {
-        return Err(anyhow!(
-            "Cannot add 'to = {}'; absolute path required",
-            to.to_string_lossy()
-        ));
+        return Err(anyhow!("Cannot add 'to = {to}'; absolute path required",));
     }
 
     let mut outputs = vec![];
@@ -86,7 +84,7 @@ pub enum PackageSource {
     Local {
         /// A list of blobs from the Omicron build S3 bucket which should be placed
         /// within this package.
-        blobs: Option<Vec<PathBuf>>,
+        blobs: Option<Vec<Utf8PathBuf>>,
 
         /// A list of Buildomat blobs that should be placed in this package.
         buildomat_blobs: Option<Vec<PrebuiltBlob>>,
@@ -129,7 +127,7 @@ impl PackageSource {
         }
     }
 
-    fn blobs(&self) -> Option<&[PathBuf]> {
+    fn blobs(&self) -> Option<&[Utf8PathBuf]> {
         match self {
             PackageSource::Local {
                 blobs: Some(blobs), ..
@@ -191,26 +189,25 @@ pub struct Package {
     pub setup_hint: Option<String>,
 }
 
-// TODO: Can we convert to camino too?
-
+// What version should we stamp on packages, before they have been stamped?
 const DEFAULT_VERSION: semver::Version = semver::Version::new(0, 0, 0);
 
 async fn new_zone_archive_builder(
     package_name: &str,
-    output_directory: &Path,
+    output_directory: &Utf8Path,
 ) -> Result<ArchiveBuilder<GzEncoder<File>>> {
     let tarfile = output_directory.join(format!("{}.tar.gz", package_name));
-    Ok(crate::archive::new_compressed_archive_builder(&tarfile).await?)
+    crate::archive::new_compressed_archive_builder(&tarfile).await
 }
 
 impl Package {
     /// The path of a package once it is built.
-    pub fn get_output_path(&self, name: &str, output_directory: &Path) -> PathBuf {
+    pub fn get_output_path(&self, name: &str, output_directory: &Utf8Path) -> Utf8PathBuf {
         output_directory.join(self.get_output_file(name))
     }
 
     /// The path of a package after it has been "stamped" with a version.
-    pub fn get_stamped_output_path(&self, name: &str, output_directory: &Path) -> PathBuf {
+    pub fn get_stamped_output_path(&self, name: &str, output_directory: &Utf8Path) -> Utf8PathBuf {
         output_directory
             .join("versioned")
             .join(self.get_output_file(name))
@@ -228,7 +225,7 @@ impl Package {
         &self,
         target: &Target,
         name: &str,
-        output_directory: &Path,
+        output_directory: &Utf8Path,
     ) -> Result<File> {
         self.create_internal(target, &NoProgress::new(), name, output_directory)
             .await
@@ -237,9 +234,9 @@ impl Package {
     pub async fn stamp(
         &self,
         name: &str,
-        output_directory: &Path,
+        output_directory: &Utf8Path,
         version: &semver::Version,
-    ) -> Result<PathBuf> {
+    ) -> Result<Utf8PathBuf> {
         let stamp_path = self.get_stamped_output_path(name, output_directory);
         std::fs::create_dir_all(stamp_path.parent().unwrap())?;
 
@@ -259,7 +256,7 @@ impl Package {
                 let mut archive =
                     new_zone_archive_builder(name, stamp_path.parent().unwrap()).await?;
                 for input in inputs.0.iter() {
-                    self.add_input_to_package(&NoProgress::new(), &mut archive, &input)
+                    self.add_input_to_package(&NoProgress::new(), &mut archive, input)
                         .await
                         .with_context(|| format!("Adding input {input:?}"))?;
                 }
@@ -275,7 +272,7 @@ impl Package {
                 // Unpack the old tarball
                 let original_file = self.get_output_path(name, output_directory);
                 let mut reader = tar::Archive::new(open_tarfile(&original_file)?);
-                let tmp = tempfile::tempdir()?;
+                let tmp = camino_tempfile::tempdir()?;
                 reader.unpack(tmp.path())?;
 
                 // Remove the placeholder version
@@ -309,7 +306,7 @@ impl Package {
         progress: &impl Progress,
         target: &Target,
         name: &str,
-        output_directory: &Path,
+        output_directory: &Utf8Path,
     ) -> Result<File> {
         self.create_internal(target, progress, name, output_directory)
             .await
@@ -320,7 +317,7 @@ impl Package {
         target: &Target,
         progress: &impl Progress,
         name: &str,
-        output_directory: &Path,
+        output_directory: &Utf8Path,
     ) -> Result<File> {
         // TODO: Plumb options to "not do the cache stuff" for performance
         // difference checking
@@ -337,7 +334,7 @@ impl Package {
             }
         };
 
-        timer.log_all(&progress.get_log());
+        timer.log_all(progress.get_log());
         Ok(output)
     }
 
@@ -395,7 +392,7 @@ impl Package {
         let mut inputs = BuildInputs::new();
 
         for path in paths {
-            let path = path.interpolate(&target)?;
+            let path = path.interpolate(target)?;
             let from = path.from;
             let to = path.to;
 
@@ -406,7 +403,7 @@ impl Package {
                     inputs.0.extend(
                         zone_get_all_parent_inputs(to.parent().unwrap())?
                             .into_iter()
-                            .map(|dir| BuildInput::AddDirectory(dir)),
+                            .map(BuildInput::AddDirectory),
                     );
                 }
                 PackageOutput::Tarball => {}
@@ -416,18 +413,13 @@ impl Package {
                 // a better error message.
                 return Err(anyhow!(
                     "Cannot add path \"{}\" to package \"{}\" because it does not exist",
-                    from.to_string_lossy(),
+                    from,
                     self.service_name,
                 ));
             }
 
-            let from_root = std::fs::canonicalize(&from).map_err(|e| {
-                anyhow!(
-                    "failed to canonicalize \"{}\": {}",
-                    from.to_string_lossy(),
-                    e
-                )
-            })?;
+            let from_root = std::fs::canonicalize(&from)
+                .map_err(|e| anyhow!("failed to canonicalize \"{}\": {}", from, e))?;
             let entries = walkdir::WalkDir::new(&from_root)
                 // Pick up symlinked files.
                 .follow_links(true)
@@ -438,7 +430,9 @@ impl Package {
                 let dst = if from.is_dir() {
                     // If copying a directory (and intermediates), strip out the
                     // source prefix when creating the target path.
-                    to.join(entry.path().strip_prefix(&from_root)?)
+                    to.join(<&Utf8Path>::try_from(
+                        entry.path().strip_prefix(&from_root)?,
+                    )?)
                 } else {
                     // If copying a single file, it should be copied exactly.
                     assert_eq!(entry.path(), from_root.as_path());
@@ -459,7 +453,7 @@ impl Package {
                         .0
                         .push(BuildInput::AddDirectory(TargetDirectory(dst)));
                 } else if entry.file_type().is_file() {
-                    let src = entry.path();
+                    let src = <&Utf8Path>::try_from(entry.path())?;
                     inputs.0.push(BuildInput::AddFile(MappedPath {
                         from: src.to_path_buf(),
                         to: dst,
@@ -481,7 +475,7 @@ impl Package {
         &self,
         package_name: &str,
         target: &Target,
-        output_directory: &Path,
+        output_directory: &Utf8Path,
         zoned: bool,
         version: Option<&semver::Version>,
     ) -> Result<BuildInputs> {
@@ -494,15 +488,11 @@ impl Package {
 
         match &self.source {
             PackageSource::Local { paths, .. } => {
+                all_paths.0.extend(self.get_paths_inputs(target, paths)?.0);
+                all_paths.0.extend(self.get_rust_inputs()?.0);
                 all_paths
                     .0
-                    .extend(self.get_paths_inputs(target, &paths)?.0.into_iter());
-                all_paths.0.extend(self.get_rust_inputs()?.0.into_iter());
-                all_paths.0.extend(
-                    self.get_blobs_inputs(output_directory, zoned)?
-                        .0
-                        .into_iter(),
-                );
+                    .extend(self.get_blobs_inputs(output_directory, zoned)?.0);
             }
             PackageSource::Composite { packages } => {
                 for component_package in packages {
@@ -527,16 +517,18 @@ impl Package {
         if let Some(rust_pkg) = self.source.rust_package() {
             let dst_directory = match self.output {
                 PackageOutput::Zone { .. } => {
-                    let dst = Path::new("/opt/oxide").join(&self.service_name).join("bin");
+                    let dst = Utf8Path::new("/opt/oxide")
+                        .join(&self.service_name)
+                        .join("bin");
                     inputs.0.extend(
                         zone_get_all_parent_inputs(&dst)?
                             .into_iter()
-                            .map(|dir| BuildInput::AddDirectory(dir)),
+                            .map(BuildInput::AddDirectory),
                     );
 
                     zone_archive_path(&dst)?
                 }
-                PackageOutput::Tarball => PathBuf::from(""),
+                PackageOutput::Tarball => Utf8PathBuf::from(""),
             };
 
             for binary in &rust_pkg.binary_names {
@@ -548,16 +540,20 @@ impl Package {
         Ok(inputs)
     }
 
-    fn get_blobs_inputs(&self, download_directory: &Path, zoned: bool) -> Result<BuildInputs> {
+    fn get_blobs_inputs(&self, download_directory: &Utf8Path, zoned: bool) -> Result<BuildInputs> {
         let mut inputs = BuildInputs::new();
 
         let destination_path = if zoned {
-            zone_archive_path(&Path::new("/opt/oxide").join(&self.service_name).join(BLOB))?
+            zone_archive_path(
+                &Utf8Path::new("/opt/oxide")
+                    .join(&self.service_name)
+                    .join(BLOB),
+            )?
         } else {
-            PathBuf::from(BLOB)
+            Utf8PathBuf::from(BLOB)
         };
         if let Some(s3_blobs) = self.source.blobs() {
-            inputs.0.extend(s3_blobs.into_iter().map(|blob| {
+            inputs.0.extend(s3_blobs.iter().map(|blob| {
                 let from = download_directory.join(&self.service_name).join(blob);
                 let to = destination_path.join(blob);
                 BuildInput::AddBlob {
@@ -567,7 +563,7 @@ impl Package {
             }))
         }
         if let Some(buildomat_blobs) = self.source.buildomat_blobs() {
-            inputs.0.extend(buildomat_blobs.into_iter().map(|blob| {
+            inputs.0.extend(buildomat_blobs.iter().map(|blob| {
                 let from = download_directory
                     .join(&self.service_name)
                     .join(&blob.artifact);
@@ -587,7 +583,7 @@ impl Package {
         target: &Target,
         progress: &impl Progress,
         name: &str,
-        output_directory: &Path,
+        output_directory: &Utf8Path,
     ) -> Result<File> {
         let cache = crate::cache::Cache::new(output_directory).await?;
         timer.start("walking paths (identifying all inputs)");
@@ -625,7 +621,7 @@ impl Package {
         let mut archive = new_zone_archive_builder(name, output_directory).await?;
 
         for input in inputs.0.iter() {
-            self.add_input_to_package(progress, &mut archive, &input)
+            self.add_input_to_package(progress, &mut archive, input)
                 .await
                 .with_context(|| format!("Adding input {input:?}"))?;
         }
@@ -655,12 +651,12 @@ impl Package {
         version: &semver::Version,
     ) -> Result<()> {
         // Add the version file to the archive
-        let mut version_file = tokio::fs::File::from_std(tempfile::tempfile()?);
+        let mut version_file = tokio::fs::File::from_std(camino_tempfile::tempfile()?);
         version_file
             .write_all(version.to_string().as_bytes())
             .await?;
         version_file.seek(std::io::SeekFrom::Start(0)).await?;
-        let version_filename = Path::new("VERSION");
+        let version_filename = Utf8Path::new("VERSION");
         archive
             .append_file_async(version_filename, &mut version_file.into_std().await)
             .await?;
@@ -675,52 +671,47 @@ impl Package {
     ) -> Result<()> {
         match &input {
             BuildInput::AddInMemoryFile { dst_path, contents } => {
-                let mut src_file = tokio::fs::File::from_std(tempfile::tempfile()?);
+                let mut src_file = tokio::fs::File::from_std(camino_tempfile::tempfile()?);
                 src_file.write_all(contents.as_bytes()).await?;
                 src_file.seek(std::io::SeekFrom::Start(0)).await?;
                 archive
                     .builder
-                    .append_file_async(&dst_path, &mut src_file.into_std().await)
+                    .append_file_async(dst_path, &mut src_file.into_std().await)
                     .await?;
             }
             BuildInput::AddDirectory(dir) => archive.builder.append_dir(&dir.0, ".")?,
             BuildInput::AddFile(paths) => {
                 let src = &paths.from;
                 let dst = &paths.to;
-                progress.set_message(format!("adding file: {}", src.display()).into());
+                progress.set_message(format!("adding file: {}", src).into());
                 archive
                     .builder
-                    .append_path_with_name_async(&src, &dst)
+                    .append_path_with_name_async(src, dst)
                     .await
-                    .context(format!(
-                        "Failed to add file '{}' to '{}'",
-                        src.display(),
-                        dst.display()
-                    ))?;
+                    .context(format!("Failed to add file '{}' to '{}'", src, dst,))?;
             }
             BuildInput::AddBlob { path, blob } => {
                 // TODO: Like the rust packages being built ahead-of-time,
                 // we could ensure all the blobs have been downloaded before
                 // adding them to this package?
                 //
-                // TODO: That seems important to preserve concurrency of
-                // downloads.
+                // That seems important it we want downloads to be concurrent.
+                // Granted, this optimization matters less for an incremental
+                // workflow.
                 let blobs_path = path.from.parent().unwrap();
-                std::fs::create_dir_all(&blobs_path)?;
+                std::fs::create_dir_all(blobs_path)?;
 
                 let blob_path = match &blob {
                     blob::Source::S3(s) => blobs_path.join(s),
                     blob::Source::Buildomat(spec) => blobs_path.join(&spec.artifact),
                 };
 
-                blob::download(progress, &blob, &blob_path)
+                blob::download(progress, blob, &blob_path)
                     .await
                     .with_context(|| format!("failed to download blob: {}", blob.get_url()))?;
             }
             BuildInput::AddPackage(component_package) => {
-                progress.set_message(
-                    format!("adding package: {}", component_package.0.display()).into(),
-                );
+                progress.set_message(format!("adding package: {}", component_package.0).into());
                 add_package_to_zone_archive(archive, &component_package.0).await?;
             }
         }
@@ -733,7 +724,7 @@ impl Package {
         target: &Target,
         progress: &impl Progress,
         name: &str,
-        output_directory: &Path,
+        output_directory: &Utf8Path,
     ) -> Result<File> {
         if !matches!(self.source, PackageSource::Local { .. }) {
             bail!("Cannot create non-local tarball");
@@ -769,7 +760,7 @@ impl Package {
         archive.builder.mode(tar::HeaderMode::Deterministic);
 
         for input in inputs.0.iter() {
-            self.add_input_to_package(progress, &mut archive, &input)
+            self.add_input_to_package(progress, &mut archive, input)
                 .await?;
         }
 
@@ -806,7 +797,7 @@ pub struct RustPackage {
 
 impl RustPackage {
     // Returns the path to the compiled binary.
-    fn local_binary_path(name: &str, release: bool) -> PathBuf {
+    fn local_binary_path(name: &str, release: bool) -> Utf8PathBuf {
         format!(
             "target/{}/{}",
             if release { "release" } else { "debug" },
@@ -852,8 +843,6 @@ impl InterpolatedString {
     }
 }
 
-// TODO: Pull these mapped paths into a new module?
-
 /// A pair of path templates, mapping from a file or directory on the host to the target.
 ///
 /// These paths may require target-specific interpretation before being
@@ -869,8 +858,8 @@ pub struct InterpolatedMappedPath {
 impl InterpolatedMappedPath {
     fn interpolate(&self, target: &Target) -> Result<MappedPath> {
         Ok(MappedPath {
-            from: PathBuf::from(self.from.interpolate(target)?),
-            to: PathBuf::from(self.to.interpolate(target)?),
+            from: Utf8PathBuf::from(self.from.interpolate(target)?),
+            to: Utf8PathBuf::from(self.to.interpolate(target)?),
         })
     }
 }

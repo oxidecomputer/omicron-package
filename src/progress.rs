@@ -41,6 +41,12 @@ impl NoProgress {
     }
 }
 
+impl Default for NoProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Progress for NoProgress {
     fn get_log(&self) -> &Logger {
         &self.log

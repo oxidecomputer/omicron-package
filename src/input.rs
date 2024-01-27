@@ -2,24 +2,24 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 
 /// A directory that should be added to the target archive
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TargetDirectory(pub PathBuf);
+pub struct TargetDirectory(pub Utf8PathBuf);
 
 /// A package that should be added to the target archive
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TargetPackage(pub PathBuf);
+pub struct TargetPackage(pub Utf8PathBuf);
 
 /// A pair of paths, mapping from a file or directory on the host to the target
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MappedPath {
     /// Source path.
-    pub from: PathBuf,
+    pub from: Utf8PathBuf,
     /// Destination path.
-    pub to: PathBuf,
+    pub to: Utf8PathBuf,
 }
 
 /// All possible inputs which are used to construct Omicron packages
@@ -28,7 +28,10 @@ pub enum BuildInput {
     /// Adds a single file, which is stored in-memory.
     ///
     /// This is mostly used as a way to cache metadata.
-    AddInMemoryFile { dst_path: PathBuf, contents: String },
+    AddInMemoryFile {
+        dst_path: Utf8PathBuf,
+        contents: String,
+    },
 
     /// Add a single directory to the target archive.
     ///
@@ -56,7 +59,7 @@ pub enum BuildInput {
 
 impl BuildInput {
     /// If the input has a path on the host machine, return it.
-    pub fn input_path(&self) -> Option<&Path> {
+    pub fn input_path(&self) -> Option<&Utf8Path> {
         match self {
             // This file is stored in-memory, it isn't cached.
             BuildInput::AddInMemoryFile { .. } => None,
@@ -76,5 +79,11 @@ pub struct BuildInputs(pub Vec<BuildInput>);
 impl BuildInputs {
     pub fn new() -> Self {
         Self(vec![])
+    }
+}
+
+impl Default for BuildInputs {
+    fn default() -> Self {
+        Self::new()
     }
 }

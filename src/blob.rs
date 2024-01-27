@@ -5,12 +5,12 @@
 //! Tools for downloading blobs
 
 use anyhow::{anyhow, Context, Result};
+use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, FixedOffset, Utc};
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
 use ring::digest::{Context as DigestContext, Digest, SHA256};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -23,14 +23,14 @@ pub(crate) const BLOB: &str = "blob";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Source {
-    S3(PathBuf),
+    S3(Utf8PathBuf),
     Buildomat(crate::package::PrebuiltBlob),
 }
 
 impl Source {
     pub(crate) fn get_url(&self) -> String {
         match self {
-            Self::S3(s) => format!("{}/{}", S3_BUCKET, s.to_string_lossy()),
+            Self::S3(s) => format!("{}/{}", S3_BUCKET, s),
             Self::Buildomat(spec) => {
                 format!(
                     "https://buildomat.eng.oxide.computer/public/file/oxidecomputer/{}/{}/{}/{}",
@@ -44,7 +44,7 @@ impl Source {
         &self,
         url: &str,
         client: &reqwest::Client,
-        destination: &Path,
+        destination: &Utf8Path,
     ) -> Result<bool> {
         if !destination.exists() {
             return Ok(true);
@@ -91,10 +91,16 @@ impl Source {
 }
 
 // Downloads "source" from S3_BUCKET to "destination".
-pub async fn download(progress: &impl Progress, source: &Source, destination: &Path) -> Result<()> {
+pub async fn download(
+    progress: &impl Progress,
+    source: &Source,
+    destination: &Utf8Path,
+) -> Result<()> {
     let blob = destination
         .file_name()
-        .ok_or_else(|| anyhow!("missing blob filename"))?;
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing blob filename"))?
+        .to_string();
 
     let url = source.get_url();
     let client = reqwest::Client::new();
@@ -133,7 +139,7 @@ pub async fn download(progress: &impl Progress, source: &Source, destination: &P
     } else {
         Box::new(NoProgress::new())
     };
-    blob_progress.set_message(blob.to_string_lossy().into_owned().into());
+    blob_progress.set_message(blob.into());
 
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -167,7 +173,7 @@ pub async fn download(progress: &impl Progress, source: &Source, destination: &P
     Ok(())
 }
 
-async fn get_sha256_digest(path: &Path) -> Result<Digest> {
+async fn get_sha256_digest(path: &Utf8Path) -> Result<Digest> {
     let mut reader = BufReader::new(
         tokio::fs::File::open(path)
             .await

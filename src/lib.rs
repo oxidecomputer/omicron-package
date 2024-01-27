@@ -6,6 +6,7 @@ mod archive;
 pub mod blob;
 pub mod cache;
 pub mod config;
+mod digest;
 pub mod input;
 pub mod package;
 pub mod progress;
