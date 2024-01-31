@@ -6,15 +6,16 @@
 mod test {
     use anyhow::Result;
     use camino::Utf8PathBuf;
-    use omicron_zone_package::config;
-    use omicron_zone_package::target::Target;
     use std::convert::TryInto;
     use std::fs::File;
     use std::io::Read;
     use tar::Archive;
 
     use omicron_zone_package::blob::download;
+    use omicron_zone_package::config;
+    use omicron_zone_package::package::BuildConfig;
     use omicron_zone_package::progress::NoProgress;
+    use omicron_zone_package::target::Target;
 
     fn entry_path<'a, R>(entry: &tar::Entry<'a, R>) -> Utf8PathBuf
     where
@@ -62,8 +63,9 @@ mod test {
 
         // Create the packaged file
         let out = camino_tempfile::tempdir().unwrap();
+        let build_config = BuildConfig::default();
         package
-            .create_for_target(&Target::default(), package_name, out.path())
+            .create(package_name, out.path(), &build_config)
             .await
             .unwrap();
 
@@ -100,8 +102,9 @@ mod test {
 
         // Create the packaged file
         let out = camino_tempfile::tempdir().unwrap();
+        let build_config = BuildConfig::default();
         package
-            .create_for_target(&Target::default(), package_name, out.path())
+            .create(package_name, out.path(), &build_config)
             .await
             .unwrap();
 
@@ -142,8 +145,9 @@ mod test {
 
         // Create the packaged file
         let out = camino_tempfile::tempdir().unwrap();
+        let build_config = BuildConfig::default();
         package
-            .create_for_target(&Target::default(), package_name, out.path())
+            .create(package_name, out.path(), &build_config)
             .await
             .unwrap();
 
@@ -196,8 +200,9 @@ mod test {
 
         // Create the packaged file
         let out = camino_tempfile::tempdir().unwrap();
+        let build_config = BuildConfig::default();
         package
-            .create_for_target(&Target::default(), package_name, out.path())
+            .create(package_name, out.path(), &build_config)
             .await
             .unwrap();
 
@@ -226,10 +231,11 @@ mod test {
         let mut batch_pkg_names: Vec<_> = batch.iter().map(|(name, _)| *name).collect();
         batch_pkg_names.sort();
         assert_eq!(batch_pkg_names, vec!["pkg-1", "pkg-2"]);
+        let build_config = BuildConfig::default();
         for (package_name, package) in batch {
             // Create the packaged file
             package
-                .create_for_target(&Target::default(), package_name, out.path())
+                .create(package_name, out.path(), &build_config)
                 .await
                 .unwrap();
         }
@@ -240,8 +246,9 @@ mod test {
         let package_name = "pkg-3";
         assert_eq!(batch_pkg_names, vec![package_name]);
         let package = cfg.packages.get(package_name).unwrap();
+        let build_config = BuildConfig::default();
         package
-            .create_for_target(&Target::default(), package_name, out.path())
+            .create(package_name, out.path(), &build_config)
             .await
             .unwrap();
 
