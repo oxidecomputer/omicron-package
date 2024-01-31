@@ -40,6 +40,7 @@ impl PhaseStart {
     }
 }
 
+/// Describes a single phase of time, with a start time, end time, and label.
 pub struct Phase {
     start: PhaseStart,
     end: PhaseEnd,
@@ -59,6 +60,7 @@ impl Phase {
     }
 }
 
+/// A utility for tracking a series of related timers.
 pub struct BuildTimer {
     current: Option<PhaseStart>,
     past: Vec<Phase>,
@@ -72,6 +74,7 @@ impl BuildTimer {
         }
     }
 
+    /// Starts a new timer, ending a prior phase if one was in progress.
     pub fn start<S: Into<CowStr>>(&mut self, s: S) {
         // If a prior phase was ongoing, mark it completed
         if self.current.is_some() {
@@ -80,10 +83,12 @@ impl BuildTimer {
         self.current = Some(PhaseStart::new(s.into()));
     }
 
+    /// Terminates the current phase with a label.
     pub fn finish_with_label<S: Into<CowStr>>(&mut self, label: S) -> Result<()> {
         self.finish_inner(Some(label.into()))
     }
 
+    /// Terminates the current phase.
     pub fn finish(&mut self) -> Result<()> {
         self.finish_inner(Option::<CowStr>::None)
     }
@@ -96,10 +101,12 @@ impl BuildTimer {
         Ok(())
     }
 
+    /// Returns all previously completed phases.
     pub fn completed(&self) -> &Vec<Phase> {
         &self.past
     }
 
+    /// A helper for logging all [Self::completed] phases.
     pub fn log_all(&self, log: &Logger) {
         for phase in self.completed() {
             let name = phase.name();

@@ -31,20 +31,19 @@ pub const CACHE_SUBDIRECTORY: &str = "manifest-cache";
 pub type Inputs = Vec<BuildInput>;
 
 // It's not actually a map, because serde doesn't like enum keys.
-// But this is logically a "BTreeMap".
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
+//
+// This has the side-effect that changing the order of input files
+// changes the package.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct InputMap(Vec<InputEntry>);
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct InputEntry {
     key: BuildInput,
-    // TODO: could track "mtime", or "length"? Quick alternative to "digest"?
-    //
-    // Maybe should be part of BuildInput structure?
     value: Option<Digest>,
 }
 
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactManifest<D = DefaultDigest> {
     // All inputs, which create this artifact
     inputs: InputMap,
@@ -58,7 +57,7 @@ pub struct ArtifactManifest<D = DefaultDigest> {
 
 impl<D: FileDigester> ArtifactManifest<D> {
     /// Reads all inputs and outputs, collecting their digests.
-    pub async fn new(inputs: &BuildInputs, output_path: Utf8PathBuf) -> anyhow::Result<Self> {
+    async fn new(inputs: &BuildInputs, output_path: Utf8PathBuf) -> anyhow::Result<Self> {
         let result = Self::new_internal(inputs, output_path, None).await?;
         Ok(result)
     }
@@ -186,8 +185,13 @@ impl CacheError {
     }
 }
 
+/// Provides access to a set of manifests describing packages.
+///
+/// Provides two primary operations:
+/// - [Self::lookup]: Support for finding previously-built packages
+/// - [Self::update]: Support for updating a package's latest manifest
 pub struct Cache {
-    output_directory: Utf8PathBuf,
+    disabled: bool,
     cache_directory: Utf8PathBuf,
 }
 
@@ -197,9 +201,15 @@ impl Cache {
         let cache_directory = output_directory.join(CACHE_SUBDIRECTORY);
         tokio::fs::create_dir_all(&cache_directory).await?;
         Ok(Self {
-            output_directory: output_directory.to_path_buf(),
+            disabled: false,
             cache_directory,
         })
+    }
+
+    /// If "disable" is true, causes cache operations to be no-ops.
+    /// Otherwise, causes the cache to act normally.
+    pub fn set_disable(&mut self, disable: bool) {
+        self.disabled = disable;
     }
 
     /// Looks up an entry from the cache.
@@ -207,14 +217,20 @@ impl Cache {
     /// Confirms that the artifact exists.
     pub async fn lookup(
         &self,
-        artifact_filename: &str,
         inputs: &BuildInputs,
+        output_path: &Utf8Path,
     ) -> Result<ArtifactManifest, CacheError> {
+        if self.disabled {
+            return Err(CacheError::miss("Cache disabled"));
+        }
+
+        let artifact_filename = output_path
+            .file_name()
+            .ok_or_else(|| CacheError::Other(anyhow!("Output has no file name")))?;
         let mut manifest_filename = String::from(artifact_filename);
         manifest_filename.push_str(".json");
 
         let manifest_path = self.cache_directory.join(manifest_filename);
-        let artifact_path = self.output_directory.join(artifact_filename);
 
         // Look up the manifest file in the cache
         let manifest = ArtifactManifest::read_from(&manifest_path).await?;
@@ -230,19 +246,19 @@ impl Cache {
         {
             return Err(CacheError::miss("Set of inputs has changed"));
         }
-        if artifact_path != manifest.output_path {
+        if output_path != manifest.output_path {
             return Err(CacheError::miss(format!(
                 "Output path changed from {} -> {}",
-                manifest.output_path, artifact_path,
+                manifest.output_path, output_path,
             )));
         }
 
         // Confirm the output file exists
-        if !tokio::fs::try_exists(&artifact_path)
+        if !tokio::fs::try_exists(&output_path)
             .await
             .map_err(|e| CacheError::miss(format!("Cannot locate output artifact: {e}")))?
         {
-            return Err(CacheError::miss("Cannot find output artifact"));
+            return Err(CacheError::miss("Output does not exist"));
         }
 
         // Confirm the output matches.
@@ -263,7 +279,7 @@ impl Cache {
         //
         // This calculation bails out early if any inputs don't match.
         let calculated_manifest =
-            ArtifactManifest::new_internal(inputs, artifact_path.to_path_buf(), Some(&manifest))
+            ArtifactManifest::new_internal(inputs, output_path.to_path_buf(), Some(&manifest))
                 .await?;
 
         // This is a hard stop-gap against any other differences in the
@@ -277,11 +293,21 @@ impl Cache {
     }
 
     /// Updates an artifact's entry within the cache
-    //
-    // TODO: Don't take ArtifactManifest as input
-    // TODO: Re-create it. This means "cache no-op" options can be a cache
-    // parameter.
-    pub async fn update(&self, manifest: &ArtifactManifest) -> Result<(), CacheError> {
+    pub async fn update(
+        &self,
+        inputs: &BuildInputs,
+        output_path: &Utf8Path,
+    ) -> Result<(), CacheError> {
+        if self.disabled {
+            // Return immediately, regardless of the input. We have nothing to
+            // calculate, and nothing to save.
+            return Ok(());
+        }
+
+        // This call actually acquires the digests for all inputs
+        let manifest =
+            ArtifactManifest::<DefaultDigest>::new(inputs, output_path.to_path_buf()).await?;
+
         let Some(artifact_filename) = manifest.output_path.file_name() else {
             return Err(anyhow!("Bad manifest: Missing output name").into());
         };
@@ -295,4 +321,185 @@ impl Cache {
     }
 }
 
-// TODO: I could test this in isolation from the rest of packaging?
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::input::MappedPath;
+    use camino::Utf8PathBuf;
+    use camino_tempfile::{tempdir, Utf8TempDir};
+
+    struct CacheTest {
+        _input_dir: Utf8TempDir,
+        output_dir: Utf8TempDir,
+
+        input_path: Utf8PathBuf,
+        output_path: Utf8PathBuf,
+    }
+
+    impl CacheTest {
+        fn new() -> Self {
+            let input_dir = tempdir().unwrap();
+            let output_dir = tempdir().unwrap();
+            let input_path = input_dir.path().join("binary.exe");
+            let output_path = output_dir.path().join("output.tar.gz");
+            Self {
+                _input_dir: input_dir,
+                output_dir,
+                input_path,
+                output_path,
+            }
+        }
+
+        async fn create_input(&self, contents: &str) {
+            tokio::fs::write(&self.input_path, contents).await.unwrap()
+        }
+
+        async fn create_output(&self, contents: &str) {
+            tokio::fs::write(&self.output_path, contents).await.unwrap()
+        }
+
+        async fn remove_output(&self) {
+            tokio::fs::remove_file(&self.output_path).await.unwrap()
+        }
+    }
+
+    fn expect_missing_manifest(err: &CacheError, file: &str) {
+        match &err {
+            CacheError::CacheMiss { reason } => {
+                let expected = format!("{file}.json not found");
+                assert!(reason.contains(&expected), "{}", reason);
+            }
+            _ => panic!("Unexpected error: {}", err),
+        }
+    }
+
+    fn expect_cache_disabled(err: &CacheError) {
+        match &err {
+            CacheError::CacheMiss { reason } => {
+                assert!(reason.contains("Cache disabled"), "{}", reason);
+            }
+            _ => panic!("Unexpected error: {}", err),
+        }
+    }
+
+    fn expect_changed_manifests(err: &CacheError) {
+        match &err {
+            CacheError::CacheMiss { reason } => {
+                assert!(reason.contains("Manifests appear different"), "{}", reason);
+            }
+            _ => panic!("Unexpected error: {}", err),
+        }
+    }
+
+    fn expect_missing_output(err: &CacheError) {
+        match &err {
+            CacheError::CacheMiss { reason } => {
+                assert!(reason.contains("Output does not exist"), "{}", reason);
+            }
+            _ => panic!("Unexpected error: {}", err),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cache_lookup_misses_before_update() {
+        let test = CacheTest::new();
+
+        test.create_input("Hi I'm the input file").await;
+        let inputs = BuildInputs(vec![BuildInput::add_file(MappedPath {
+            from: test.input_path.to_path_buf(),
+            to: Utf8PathBuf::from("/very/important/file"),
+        })
+        .unwrap()]);
+
+        let cache = Cache::new(test.output_dir.path()).await.unwrap();
+
+        // Look for the package in the cache. It shouldn't exist.
+        let err = cache.lookup(&inputs, &test.output_path).await.unwrap_err();
+        expect_missing_manifest(&err, "output.tar.gz");
+
+        // Create the output we're expecting
+        test.create_output("Hi I'm the output file").await;
+
+        // Still expect a failure; we haven't called "cache.update".
+        let err = cache.lookup(&inputs, &test.output_path).await.unwrap_err();
+        expect_missing_manifest(&err, "output.tar.gz");
+    }
+
+    #[tokio::test]
+    async fn test_cache_lookup_hits_after_update() {
+        let test = CacheTest::new();
+
+        test.create_input("Hi I'm the input file").await;
+        let inputs = BuildInputs(vec![BuildInput::add_file(MappedPath {
+            from: test.input_path.to_path_buf(),
+            to: Utf8PathBuf::from("/very/important/file"),
+        })
+        .unwrap()]);
+
+        // Create the output we're expecting
+        test.create_output("Hi I'm the output file").await;
+
+        let cache = Cache::new(test.output_dir.path()).await.unwrap();
+
+        // If we update the cache, we expect a hit.
+        cache.update(&inputs, &test.output_path).await.unwrap();
+        cache.lookup(&inputs, &test.output_path).await.unwrap();
+
+        // If we update the input again, we expect a miss.
+        test.create_input("hi i'M tHe InPuT fIlE").await;
+        let err = cache.lookup(&inputs, &test.output_path).await.unwrap_err();
+        expect_changed_manifests(&err);
+    }
+
+    #[tokio::test]
+    async fn test_cache_lookup_misses_after_removing_output() {
+        let test = CacheTest::new();
+
+        test.create_input("Hi I'm the input file").await;
+        let inputs = BuildInputs(vec![BuildInput::add_file(MappedPath {
+            from: test.input_path.to_path_buf(),
+            to: Utf8PathBuf::from("/very/important/file"),
+        })
+        .unwrap()]);
+
+        // Create the output we're expecting
+        test.create_output("Hi I'm the output file").await;
+
+        let cache = Cache::new(test.output_dir.path()).await.unwrap();
+
+        // If we update the cache, we expect a hit.
+        cache.update(&inputs, &test.output_path).await.unwrap();
+        cache.lookup(&inputs, &test.output_path).await.unwrap();
+
+        // If we remove the output file, we expect a miss.
+        // This is somewhat of a "special case", as all the inputs are the same.
+        test.remove_output().await;
+        let err = cache.lookup(&inputs, &test.output_path).await.unwrap_err();
+        expect_missing_output(&err);
+    }
+
+    #[tokio::test]
+    async fn test_cache_disabled_always_misses() {
+        let test = CacheTest::new();
+
+        test.create_input("Hi I'm the input file").await;
+        let inputs = BuildInputs(vec![BuildInput::add_file(MappedPath {
+            from: test.input_path.to_path_buf(),
+            to: Utf8PathBuf::from("/very/important/file"),
+        })
+        .unwrap()]);
+
+        // Create the output we're expecting
+        test.create_output("Hi I'm the output file").await;
+
+        let mut cache = Cache::new(test.output_dir.path()).await.unwrap();
+        cache.set_disable(true);
+
+        // Updating the cache should still succeed, though it'll do nothing.
+        cache.update(&inputs, &test.output_path).await.unwrap();
+
+        // The lookup will miss, as the cache has been disabled.
+        let err = cache.lookup(&inputs, &test.output_path).await.unwrap_err();
+        expect_cache_disabled(&err);
+    }
+}

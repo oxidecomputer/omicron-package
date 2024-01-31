@@ -9,7 +9,7 @@ use crate::archive::{
     Encoder,
 };
 use crate::blob::{self, BLOB};
-use crate::cache::{ArtifactManifest, CacheError};
+use crate::cache::{Cache, CacheError};
 use crate::input::{BuildInput, BuildInputs, MappedPath, TargetDirectory, TargetPackage};
 use crate::progress::{NoProgress, Progress};
 use crate::target::Target;
@@ -200,6 +200,31 @@ async fn new_zone_archive_builder(
     crate::archive::new_compressed_archive_builder(&tarfile).await
 }
 
+/// Configuration that can modify how a package is built.
+pub struct BuildConfig<'a> {
+    /// Describes the [Target] to build the package for.
+    pub target: &'a Target,
+
+    /// Describes how progress will be communicated back to the caller.
+    pub progress: &'a dyn Progress,
+
+    /// If "true", disables all caching.
+    pub cache_disabled: bool,
+}
+
+static DEFAULT_TARGET: Target = Target(BTreeMap::new());
+static DEFAULT_PROGRESS: NoProgress = NoProgress::new();
+
+impl<'a> Default for BuildConfig<'a> {
+    fn default() -> Self {
+        Self {
+            target: &DEFAULT_TARGET,
+            progress: &DEFAULT_PROGRESS,
+            cache_disabled: false,
+        }
+    }
+}
+
 impl Package {
     /// The path of a package once it is built.
     pub fn get_output_path(&self, name: &str, output_directory: &Utf8Path) -> Utf8PathBuf {
@@ -221,13 +246,28 @@ impl Package {
         }
     }
 
+    #[deprecated = "Use 'Package::create', which now takes a 'BuildConfig', and implements 'Default'"]
     pub async fn create_for_target(
         &self,
         target: &Target,
         name: &str,
         output_directory: &Utf8Path,
     ) -> Result<File> {
-        self.create_internal(target, &NoProgress::new(), name, output_directory)
+        let build_config = BuildConfig {
+            target,
+            ..Default::default()
+        };
+        self.create_internal(name, output_directory, &build_config)
+            .await
+    }
+
+    pub async fn create(
+        &self,
+        name: &str,
+        output_directory: &Utf8Path,
+        build_config: &BuildConfig<'_>,
+    ) -> Result<File> {
+        self.create_internal(name, output_directory, build_config)
             .await
     }
 
@@ -301,6 +341,7 @@ impl Package {
 
     /// Identical to [`Self::create`], but allows a caller to receive updates
     /// about progress while constructing the package.
+    #[deprecated = "Use 'Package::create', which now takes a 'BuildConfig', and implements 'Default'"]
     pub async fn create_with_progress_for_target(
         &self,
         progress: &impl Progress,
@@ -308,33 +349,33 @@ impl Package {
         name: &str,
         output_directory: &Utf8Path,
     ) -> Result<File> {
-        self.create_internal(target, progress, name, output_directory)
-            .await
+        let config = BuildConfig {
+            target,
+            progress,
+            ..Default::default()
+        };
+        self.create_internal(name, output_directory, &config).await
     }
 
     async fn create_internal(
         &self,
-        target: &Target,
-        progress: &impl Progress,
         name: &str,
         output_directory: &Utf8Path,
+        config: &BuildConfig<'_>,
     ) -> Result<File> {
-        // TODO: Plumb options to "not do the cache stuff" for performance
-        // difference checking
-
         let mut timer = BuildTimer::new();
         let output = match self.output {
             PackageOutput::Zone { .. } => {
-                self.create_zone_package(&mut timer, target, progress, name, output_directory)
+                self.create_zone_package(&mut timer, name, output_directory, config)
                     .await?
             }
             PackageOutput::Tarball => {
-                self.create_tarball_package(target, progress, name, output_directory)
+                self.create_tarball_package(name, output_directory, config)
                     .await?
             }
         };
 
-        timer.log_all(progress.get_log());
+        timer.log_all(config.progress.get_log());
         Ok(output)
     }
 
@@ -454,10 +495,10 @@ impl Package {
                         .push(BuildInput::AddDirectory(TargetDirectory(dst)));
                 } else if entry.file_type().is_file() {
                     let src = <&Utf8Path>::try_from(entry.path())?;
-                    inputs.0.push(BuildInput::AddFile(MappedPath {
+                    inputs.0.push(BuildInput::add_file(MappedPath {
                         from: src.to_path_buf(),
                         to: dst,
-                    }));
+                    })?);
                 } else {
                     panic!(
                         "Unsupported file type: {:?} for {:?}",
@@ -534,7 +575,9 @@ impl Package {
             for binary in &rust_pkg.binary_names {
                 let from = RustPackage::local_binary_path(binary, rust_pkg.release);
                 let to = dst_directory.join(binary);
-                inputs.0.push(BuildInput::AddFile(MappedPath { from, to }));
+                inputs
+                    .0
+                    .push(BuildInput::add_file(MappedPath { from, to })?);
             }
         }
         Ok(inputs)
@@ -580,12 +623,14 @@ impl Package {
     async fn create_zone_package(
         &self,
         timer: &mut BuildTimer,
-        target: &Target,
-        progress: &impl Progress,
         name: &str,
         output_directory: &Utf8Path,
+        config: &BuildConfig<'_>,
     ) -> Result<File> {
-        let cache = crate::cache::Cache::new(output_directory).await?;
+        let target = &config.target;
+        let progress = &config.progress;
+        let mut cache = Cache::new(output_directory).await?;
+        cache.set_disable(config.cache_disabled);
         timer.start("walking paths (identifying all inputs)");
 
         progress.set_message("Identifying inputs".into());
@@ -601,7 +646,7 @@ impl Package {
         // Decide whether or not to use a cached copy of the zone package
         timer.start("cache lookup");
 
-        match cache.lookup(&output_file, &inputs).await {
+        match cache.lookup(&inputs, &output_path).await {
             Ok(_) => {
                 timer.finish_with_label("Cache hit")?;
                 progress.set_message("Cache hit".into());
@@ -621,7 +666,7 @@ impl Package {
         let mut archive = new_zone_archive_builder(name, output_directory).await?;
 
         for input in inputs.0.iter() {
-            self.add_input_to_package(progress, &mut archive, input)
+            self.add_input_to_package(&**progress, &mut archive, input)
                 .await
                 .with_context(|| format!("Adding input {input:?}"))?;
         }
@@ -633,11 +678,7 @@ impl Package {
         progress.set_message("Updating cached copy".into());
 
         cache
-            .update(
-                &ArtifactManifest::new(&inputs, output_path)
-                    .await
-                    .with_context(|| "Creating artifact manifest")?,
-            )
+            .update(&inputs, &output_path)
             .await
             .with_context(|| "Updating package cache")?;
 
@@ -665,7 +706,7 @@ impl Package {
 
     async fn add_input_to_package<E: Encoder>(
         &self,
-        progress: &impl Progress,
+        progress: &dyn Progress,
         archive: &mut ArchiveBuilder<E>,
         input: &BuildInput,
     ) -> Result<()> {
@@ -680,9 +721,9 @@ impl Package {
                     .await?;
             }
             BuildInput::AddDirectory(dir) => archive.builder.append_dir(&dir.0, ".")?,
-            BuildInput::AddFile(paths) => {
-                let src = &paths.from;
-                let dst = &paths.to;
+            BuildInput::AddFile { mapped_path, .. } => {
+                let src = &mapped_path.from;
+                let dst = &mapped_path.to;
                 progress.set_message(format!("adding file: {}", src).into());
                 archive
                     .builder
@@ -721,27 +762,27 @@ impl Package {
 
     async fn create_tarball_package(
         &self,
-        target: &Target,
-        progress: &impl Progress,
         name: &str,
         output_directory: &Utf8Path,
+        config: &BuildConfig<'_>,
     ) -> Result<File> {
+        let progress = &config.progress;
+
         if !matches!(self.source, PackageSource::Local { .. }) {
             bail!("Cannot create non-local tarball");
         }
 
-        let output_file = self.get_output_file(name);
         let output_path = self.get_output_path(name, output_directory);
-
-        let cache = crate::cache::Cache::new(output_directory).await?;
+        let mut cache = Cache::new(output_directory).await?;
+        cache.set_disable(config.cache_disabled);
 
         let zoned = false;
         let inputs = self
-            .get_all_inputs(name, target, output_directory, zoned, None)
+            .get_all_inputs(name, config.target, output_directory, zoned, None)
             .with_context(|| "Identifying all input paths")?;
         progress.increment_total(inputs.0.len() as u64);
 
-        match cache.lookup(&output_file, &inputs).await {
+        match cache.lookup(&inputs, &output_path).await {
             Ok(_) => {
                 progress.set_message("Cache hit".into());
                 return Ok(File::open(output_path)?);
@@ -760,7 +801,7 @@ impl Package {
         archive.builder.mode(tar::HeaderMode::Deterministic);
 
         for input in inputs.0.iter() {
-            self.add_input_to_package(progress, &mut archive, input)
+            self.add_input_to_package(&**progress, &mut archive, input)
                 .await?;
         }
 
@@ -771,11 +812,7 @@ impl Package {
 
         progress.set_message("Updating cached copy".into());
         cache
-            .update(
-                &ArtifactManifest::new(&inputs, output_path)
-                    .await
-                    .with_context(|| "Creating artifact manifest")?,
-            )
+            .update(&inputs, &output_path)
             .await
             .with_context(|| "Updating package cache")?;
 

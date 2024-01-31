@@ -2,6 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +40,21 @@ pub enum BuildInput {
     AddDirectory(TargetDirectory),
 
     /// Add a file directly from source to target.
-    AddFile(MappedPath),
+    AddFile {
+        /// Describes the files being added.
+        mapped_path: MappedPath,
+
+        /// The length of the file.
+        ///
+        /// Q: Is this necessary? Aren't we already storing the file itself,
+        /// making this field redundant?
+        ///
+        /// A: We use it to help caching, on the "known cache miss" case. In
+        /// *most* circumstances where a file has been edited, the length
+        /// changes too. Comparing u64s is significantly faster than hashing,
+        /// in this situation.
+        len: u64,
+    },
 
     /// Add a dowloaded file from source to target.
     ///
@@ -66,10 +81,20 @@ impl BuildInput {
             // This path doesn't need to exist on the host, it's just fabricated
             // on the target.
             BuildInput::AddDirectory(_target) => None,
-            BuildInput::AddFile(mapped_path) => Some(&mapped_path.from),
+            BuildInput::AddFile { mapped_path, .. } => Some(&mapped_path.from),
             BuildInput::AddBlob { path, .. } => Some(&path.from),
             BuildInput::AddPackage(target_package) => Some(&target_package.0),
         }
+    }
+
+    pub fn add_file(mapped_path: MappedPath) -> anyhow::Result<Self> {
+        let src = &mapped_path.from;
+        let len = src
+            .metadata()
+            .with_context(|| format!("Failed to get length of {src}"))?
+            .len();
+
+        Ok(Self::AddFile { mapped_path, len })
     }
 }
 

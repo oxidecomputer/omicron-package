@@ -92,7 +92,7 @@ impl Source {
 
 // Downloads "source" from S3_BUCKET to "destination".
 pub async fn download(
-    progress: &impl Progress,
+    progress: &dyn Progress,
     source: &Source,
     destination: &Utf8Path,
 ) -> Result<()> {
