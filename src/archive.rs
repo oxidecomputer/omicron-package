@@ -4,7 +4,7 @@
 
 //! Tools for creating and inserting into tarballs.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use camino::Utf8Path;
 use flate2::write::GzEncoder;
@@ -106,10 +106,10 @@ pub async fn add_package_to_zone_archive<E: Encoder>(
     let tmp = camino_tempfile::tempdir()?;
     let gzr = flate2::read::GzDecoder::new(open_tarfile(package_path)?);
     if gzr.header().is_none() {
-        return Err(anyhow!(
+        bail!(
             "Missing gzip header from {} - cannot add it to zone image",
             package_path,
-        ));
+        );
     }
     let mut component_reader = tar::Archive::new(gzr);
     let entries = component_reader.entries()?;

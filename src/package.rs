@@ -52,7 +52,7 @@ fn zone_get_all_parent_inputs(to: &Utf8Path) -> Result<Vec<TargetDirectory>> {
     parents.reverse();
 
     if to.is_relative() {
-        return Err(anyhow!("Cannot add 'to = {to}'; absolute path required",));
+        bail!("Cannot add 'to = {to}'; absolute path required");
     }
 
     let mut outputs = vec![];
@@ -452,11 +452,11 @@ impl Package {
             if !from.exists() {
                 // Strictly speaking, this check is redundant, but it provides
                 // a better error message.
-                return Err(anyhow!(
+                bail!(
                     "Cannot add path \"{}\" to package \"{}\" because it does not exist",
                     from,
                     self.service_name,
-                ));
+                );
             }
 
             let from_root = std::fs::canonicalize(&from)
@@ -543,10 +543,10 @@ impl Package {
                 }
             }
             _ => {
-                return Err(anyhow!(
+                bail!(
                     "Cannot walk over a zone package with source: {:?}",
                     self.source
-                ));
+                );
             }
         }
 
