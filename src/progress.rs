@@ -4,9 +4,9 @@
 
 //! Describes utilities for relaying progress to end-users.
 
-use std::sync::OnceLock;
 use slog::Logger;
 use std::borrow::Cow;
+use std::sync::OnceLock;
 
 /// Trait for propagating progress information while constructing the package.
 pub trait Progress {

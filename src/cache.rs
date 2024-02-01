@@ -115,8 +115,8 @@ impl<D: FileDigester> ArtifactManifest<D> {
         if extension != "json" {
             bail!("JSON encoding is all we know. Write to a '.json' file?");
         }
-        let serialized = serde_json::to_string(&self)
-            .with_context(|| "Failed to serialize ArtifactManifest to JSON")?;
+        let serialized =
+            serde_json::to_string(&self).context("Failed to serialize ArtifactManifest to JSON")?;
 
         let mut f = File::create(path).await?;
         f.write_all(serialized.as_bytes()).await?;

@@ -637,7 +637,7 @@ impl Package {
         let zoned = true;
         let inputs = self
             .get_all_inputs(name, target, output_directory, zoned, None)
-            .with_context(|| "Identifying all input paths")?;
+            .context("Identifying all input paths")?;
         progress.increment_total(inputs.0.len() as u64);
 
         let output_file = self.get_output_file(name);
@@ -657,7 +657,7 @@ impl Package {
                 progress.set_message("Cache miss".into());
             }
             Err(CacheError::Other(other)) => {
-                return Err(other).with_context(|| "Reading from package cache");
+                return Err(other).context("Reading from package cache");
             }
         }
 
@@ -680,7 +680,7 @@ impl Package {
         cache
             .update(&inputs, &output_path)
             .await
-            .with_context(|| "Updating package cache")?;
+            .context("Updating package cache")?;
 
         timer.finish()?;
         Ok(file)
@@ -779,7 +779,7 @@ impl Package {
         let zoned = false;
         let inputs = self
             .get_all_inputs(name, config.target, output_directory, zoned, None)
-            .with_context(|| "Identifying all input paths")?;
+            .context("Identifying all input paths")?;
         progress.increment_total(inputs.0.len() as u64);
 
         match cache.lookup(&inputs, &output_path).await {
@@ -791,7 +791,7 @@ impl Package {
                 progress.set_message("Cache miss".into());
             }
             Err(CacheError::Other(other)) => {
-                return Err(other).with_context(|| "Reading from package cache");
+                return Err(other).context("Reading from package cache");
             }
         }
 
@@ -814,7 +814,7 @@ impl Package {
         cache
             .update(&inputs, &output_path)
             .await
-            .with_context(|| "Updating package cache")?;
+            .context("Updating package cache")?;
 
         Ok(file)
     }

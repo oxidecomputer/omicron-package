@@ -12,6 +12,10 @@ use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use tar::Builder;
 
+/// These interfaces are similar to some methods in [tar::Builder].
+///
+/// They use [tokio::block_in_place] to avoid blocking other async
+/// tasks using the executor.
 #[async_trait]
 pub trait AsyncAppendFile {
     async fn append_file_async<P>(&mut self, path: P, file: &mut File) -> std::io::Result<()>
@@ -89,9 +93,7 @@ impl<E: Encoder> ArchiveBuilder<E> {
     }
 
     pub fn into_inner(self) -> Result<E> {
-        self.builder
-            .into_inner()
-            .with_context(|| "Finalizing archive")
+        self.builder.into_inner().context("Finalizing archive")
     }
 }
 
