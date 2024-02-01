@@ -4,7 +4,7 @@
 
 //! Describes utilities for relaying progress to end-users.
 
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use slog::Logger;
 use std::borrow::Cow;
 
@@ -31,13 +31,13 @@ pub trait Progress {
 
 /// Implements [`Progress`] as a no-op.
 pub struct NoProgress {
-    log: OnceCell<slog::Logger>,
+    log: OnceLock<slog::Logger>,
 }
 
 impl NoProgress {
     pub const fn new() -> Self {
         Self {
-            log: OnceCell::new(),
+            log: OnceLock::new(),
         }
     }
 }
