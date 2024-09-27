@@ -1,6 +1,6 @@
 [package]
 name = "omicron-zone-package"
-version = "0.11.0"
+version = "0.11.1"
 authors = ["Sean Klein <sean@oxidecomputer.com>"]
 edition = "2021"
 #
