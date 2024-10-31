@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use blake3::{Hash as BlakeDigest, Hasher as BlakeHasher};
 use camino::Utf8Path;
 use hex::ToHex;
-use ring::digest::{Context as DigestContext, Digest as ShaDigest, SHA256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt, BufReader};
 
 // The buffer size used to hash smaller files.
@@ -21,6 +21,8 @@ const HASH_BUFFER_SIZE: usize = 16 * (1 << 10);
 //
 // NOTE: This is currently only blake3-specific.
 const LARGE_HASH_SIZE: usize = 1 << 20;
+
+struct ShaDigest([u8; 32]);
 
 /// Implemented by algorithms which can take digests of files.
 #[async_trait]
@@ -36,7 +38,7 @@ impl FileDigester for ShaDigest {
                 .await
                 .with_context(|| format!("could not open {path:?}"))?,
         );
-        let mut context = DigestContext::new(&SHA256);
+        let mut hasher = Sha256::new();
         let mut buffer = [0; HASH_BUFFER_SIZE];
         loop {
             let count = reader
@@ -46,10 +48,10 @@ impl FileDigester for ShaDigest {
             if count == 0 {
                 break;
             } else {
-                context.update(&buffer[..count]);
+                hasher.update(&buffer[..count]);
             }
         }
-        let digest = context.finish().into();
+        let digest = ShaDigest(hasher.finalize().into()).into();
 
         Ok(digest)
     }
@@ -106,7 +108,7 @@ pub enum Digest {
 
 impl From<ShaDigest> for Digest {
     fn from(digest: ShaDigest) -> Self {
-        Self::Sha2(digest.as_ref().encode_hex::<String>())
+        Self::Sha2(digest.0.as_ref().encode_hex::<String>())
     }
 }
 

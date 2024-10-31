@@ -9,8 +9,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, FixedOffset, Utc};
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_LENGTH, LAST_MODIFIED};
-use ring::digest::{Context as DigestContext, Digest, SHA256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -173,13 +173,13 @@ pub async fn download(
     Ok(())
 }
 
-async fn get_sha256_digest(path: &Utf8Path) -> Result<Digest> {
+async fn get_sha256_digest(path: &Utf8Path) -> Result<[u8; 32]> {
     let mut reader = BufReader::new(
         tokio::fs::File::open(path)
             .await
             .with_context(|| format!("could not open {path:?}"))?,
     );
-    let mut context = DigestContext::new(&SHA256);
+    let mut hasher = Sha256::new();
     let mut buffer = [0; 1024];
 
     loop {
@@ -190,10 +190,10 @@ async fn get_sha256_digest(path: &Utf8Path) -> Result<Digest> {
         if count == 0 {
             break;
         } else {
-            context.update(&buffer[..count]);
+            hasher.update(&buffer[..count]);
         }
     }
-    Ok(context.finish())
+    Ok(hasher.finalize().into())
 }
 
 #[test]
