@@ -5,17 +5,19 @@
 //! Configuration for a package.
 
 use crate::package::{Package, PackageOutput, PackageSource};
-use crate::target::Target;
+use crate::target::TargetMap;
 use serde_derive::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
 use topological_sort::TopologicalSort;
 
+use super::ConfigIdent;
+
 /// Describes a set of packages to act upon.
 ///
 /// This structure maps "package name" to "package"
-pub struct PackageMap<'a>(pub BTreeMap<&'a String, &'a Package>);
+pub struct PackageMap<'a>(pub BTreeMap<&'a ConfigIdent, &'a Package>);
 
 // The name of a file which should be created by building a package.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -68,12 +70,12 @@ impl<'a> PackageMap<'a> {
 ///
 /// Returns packages in batches that may be built concurrently.
 pub struct PackageDependencyIter<'a> {
-    lookup_by_output: BTreeMap<OutputFile, (&'a String, &'a Package)>,
+    lookup_by_output: BTreeMap<OutputFile, (&'a ConfigIdent, &'a Package)>,
     outputs: TopologicalSort<OutputFile>,
 }
 
 impl<'a> Iterator for PackageDependencyIter<'a> {
-    type Item = Vec<(&'a String, &'a Package)>;
+    type Item = Vec<(&'a ConfigIdent, &'a Package)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.outputs.is_empty() {
@@ -99,27 +101,30 @@ impl<'a> Iterator for PackageDependencyIter<'a> {
 }
 
 /// Describes the configuration for a set of packages.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct Config {
     /// Packages to be built and installed.
     #[serde(default, rename = "package")]
-    pub packages: BTreeMap<String, Package>,
+    pub packages: BTreeMap<ConfigIdent, Package>,
+
+    /// Target configuration.
+    #[serde(default)]
+    pub target: TargetConfig,
 }
 
 impl Config {
     /// Returns target packages to be assembled on the builder machine.
-    pub fn packages_to_build(&self, target: &Target) -> PackageMap<'_> {
+    pub fn packages_to_build(&self, target: &TargetMap) -> PackageMap<'_> {
         PackageMap(
             self.packages
                 .iter()
                 .filter(|(_, pkg)| target.includes_package(pkg))
-                .map(|(name, pkg)| (name, pkg))
                 .collect(),
         )
     }
 
     /// Returns target packages which should execute on the deployment machine.
-    pub fn packages_to_deploy(&self, target: &Target) -> PackageMap<'_> {
+    pub fn packages_to_deploy(&self, target: &TargetMap) -> PackageMap<'_> {
         let all_packages = self.packages_to_build(target).0;
         PackageMap(
             all_packages
@@ -131,6 +136,14 @@ impl Config {
                 .collect(),
         )
     }
+}
+
+/// Configuration for targets, including preset configuration.
+#[derive(Clone, Deserialize, Debug, Default)]
+pub struct TargetConfig {
+    /// Preset configuration for targets.
+    #[serde(default, rename = "preset")]
+    pub presets: BTreeMap<ConfigIdent, TargetMap>,
 }
 
 /// Errors which may be returned when parsing the server configuration.
@@ -159,18 +172,18 @@ mod test {
 
     #[test]
     fn test_order() {
-        let pkg_a_name = String::from("pkg-a");
+        let pkg_a_name = ConfigIdent::new_const("pkg-a");
         let pkg_a = Package {
-            service_name: String::from("a"),
+            service_name: ConfigIdent::new_const("a"),
             source: PackageSource::Manual,
             output: PackageOutput::Tarball,
             only_for_targets: None,
             setup_hint: None,
         };
 
-        let pkg_b_name = String::from("pkg-b");
+        let pkg_b_name = ConfigIdent::new_const("pkg-b");
         let pkg_b = Package {
-            service_name: String::from("b"),
+            service_name: ConfigIdent::new_const("b"),
             source: PackageSource::Composite {
                 packages: vec![pkg_a.get_output_file(&pkg_a_name)],
             },
@@ -184,9 +197,10 @@ mod test {
                 (pkg_a_name.clone(), pkg_a.clone()),
                 (pkg_b_name.clone(), pkg_b.clone()),
             ]),
+            target: TargetConfig::default(),
         };
 
-        let mut order = cfg.packages_to_build(&Target::default()).build_order();
+        let mut order = cfg.packages_to_build(&TargetMap::default()).build_order();
         // "pkg-a" comes first, because "pkg-b" depends on it.
         assert_eq!(order.next(), Some(vec![(&pkg_a_name, &pkg_a)]));
         assert_eq!(order.next(), Some(vec![(&pkg_b_name, &pkg_b)]));
@@ -199,10 +213,10 @@ mod test {
     #[test]
     #[should_panic(expected = "cyclic dependency in package manifest")]
     fn test_cyclic_dependency() {
-        let pkg_a_name = String::from("pkg-a");
-        let pkg_b_name = String::from("pkg-b");
+        let pkg_a_name = ConfigIdent::new_const("pkg-a");
+        let pkg_b_name = ConfigIdent::new_const("pkg-b");
         let pkg_a = Package {
-            service_name: String::from("a"),
+            service_name: ConfigIdent::new_const("a"),
             source: PackageSource::Composite {
                 packages: vec![String::from("pkg-b.tar")],
             },
@@ -211,7 +225,7 @@ mod test {
             setup_hint: None,
         };
         let pkg_b = Package {
-            service_name: String::from("b"),
+            service_name: ConfigIdent::new_const("b"),
             source: PackageSource::Composite {
                 packages: vec![String::from("pkg-a.tar")],
             },
@@ -225,9 +239,10 @@ mod test {
                 (pkg_a_name.clone(), pkg_a.clone()),
                 (pkg_b_name.clone(), pkg_b.clone()),
             ]),
+            target: TargetConfig::default(),
         };
 
-        let mut order = cfg.packages_to_build(&Target::default()).build_order();
+        let mut order = cfg.packages_to_build(&TargetMap::default()).build_order();
         order.next();
     }
 
@@ -237,9 +252,9 @@ mod test {
     #[test]
     #[should_panic(expected = "Could not find a package which creates 'pkg-b.tar'")]
     fn test_missing_dependency() {
-        let pkg_a_name = String::from("pkg-a");
+        let pkg_a_name = ConfigIdent::new_const("pkg-a");
         let pkg_a = Package {
-            service_name: String::from("a"),
+            service_name: ConfigIdent::new_const("a"),
             source: PackageSource::Composite {
                 packages: vec![String::from("pkg-b.tar")],
             },
@@ -250,9 +265,10 @@ mod test {
 
         let cfg = Config {
             packages: BTreeMap::from([(pkg_a_name.clone(), pkg_a.clone())]),
+            target: TargetConfig::default(),
         };
 
-        let mut order = cfg.packages_to_build(&Target::default()).build_order();
+        let mut order = cfg.packages_to_build(&TargetMap::default()).build_order();
         order.next();
     }
 }
