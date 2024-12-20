@@ -3,6 +3,9 @@
 #
 name: Rust
 
+env:
+  RUSTFLAGS: -D warnings
+
 on:
   push:
     branches: [ main ]
@@ -22,15 +25,22 @@ jobs:
         components: rustfmt
     - name: Check style
       run: cargo fmt -- --check
+    - name: Check clippy
+      run: cargo clippy --all-targets --all-features
 
   build-and-test:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        # 1.81 is the MSRV.
+        toolchain: [ stable, "1.81" ]
         os: [ ubuntu-latest, macos-latest ]
     steps:
     # actions/checkout@v2
     - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938
+    - uses: dtolnay/rust-toolchain@v1
+      with:
+        toolchain: ${{ matrix.toolchain }}
     - name: Build
       run: cargo build --tests --verbose
     - name: Run tests

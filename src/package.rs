@@ -215,7 +215,7 @@ pub struct BuildConfig<'a> {
 static DEFAULT_TARGET: Target = Target(BTreeMap::new());
 static DEFAULT_PROGRESS: NoProgress = NoProgress::new();
 
-impl<'a> Default for BuildConfig<'a> {
+impl Default for BuildConfig<'_> {
     fn default() -> Self {
         Self {
             target: &DEFAULT_TARGET,

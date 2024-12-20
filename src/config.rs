@@ -113,7 +113,6 @@ impl Config {
             self.packages
                 .iter()
                 .filter(|(_, pkg)| target.includes_package(pkg))
-                .map(|(name, pkg)| (name, pkg))
                 .collect(),
         )
     }
