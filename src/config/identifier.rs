@@ -31,9 +31,7 @@ impl ConfigIdent {
 
     /// Creates a new config identifier from a static string.
     pub fn new_static(s: &'static str) -> Result<Self, InvalidConfigIdent> {
-        if let Err(error) = Self::validate(s) {
-            return Err(error);
-        }
+        Self::validate(s)?;
         Ok(Self(Cow::Borrowed(s)))
     }
 
