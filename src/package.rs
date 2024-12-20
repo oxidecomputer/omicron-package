@@ -232,6 +232,11 @@ impl Package {
         output_directory.join(self.get_output_file(id))
     }
 
+    /// The path of the service name with respect to the install directory.
+    pub fn get_output_path_for_service(&self, install_directory: &Utf8Path) -> Utf8PathBuf {
+        install_directory.join(self.get_output_file_for_service())
+    }
+
     /// The path of a package after it has been "stamped" with a version.
     pub fn get_stamped_output_path(
         &self,
@@ -248,6 +253,13 @@ impl Package {
         match self.output {
             PackageOutput::Zone { .. } => format!("{}.tar.gz", name),
             PackageOutput::Tarball => format!("{}.tar", name),
+        }
+    }
+
+    pub fn get_output_file_for_service(&self) -> String {
+        match self.output {
+            PackageOutput::Zone { .. } => format!("{}.tar.gz", self.service_name),
+            PackageOutput::Tarball => format!("{}.tar", self.service_name),
         }
     }
 
@@ -647,7 +659,7 @@ impl Package {
             .context("Identifying all input paths")?;
         progress.increment_total(inputs.0.len() as u64);
 
-        let output_file = self.get_output_file(name);
+        let output_file = self.get_output_file(&name);
         let output_path = output_directory.join(&output_file);
 
         // Decide whether or not to use a cached copy of the zone package

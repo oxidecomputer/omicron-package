@@ -31,6 +31,12 @@ macro_rules! ident_newtype {
             pub fn as_str(&self) -> &str {
                 self.0.as_str()
             }
+
+            #[inline]
+            #[allow(dead_code)]
+            pub(crate) fn as_ident(&self) -> &ConfigIdent {
+                &self.0
+            }
         }
 
         impl AsRef<str> for $id {

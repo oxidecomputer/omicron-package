@@ -75,7 +75,7 @@ mod test {
             .unwrap();
 
         // Verify the contents
-        let path = package.get_output_path(&MY_SERVICE_PACKAGE, out.path());
+        let path = package.get_output_path_for_service(out.path());
         assert!(path.exists());
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
@@ -113,7 +113,7 @@ mod test {
             .unwrap();
 
         // Verify the contents
-        let path = package.get_output_path(&MY_SERVICE_PACKAGE, out.path());
+        let path = package.get_output_path_for_service(out.path());
         assert!(path.exists());
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
@@ -155,7 +155,7 @@ mod test {
             .unwrap();
 
         // Verify the contents
-        let path = package.get_output_path(&MY_SERVICE_PACKAGE, out.path());
+        let path = package.get_output_path_for_service(out.path());
         assert!(path.exists());
         let mut archive = Archive::new(File::open(path).unwrap());
         let mut ents = archive.entries().unwrap();
