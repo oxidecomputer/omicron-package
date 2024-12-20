@@ -10,7 +10,8 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
+    # Allow CI to run on all PRs, not just ones targeting main. This allows
+    # stacked PRs to be tested.
 
 jobs:
   check-style:
