@@ -10,9 +10,10 @@ use crate::archive::{
 };
 use crate::blob::{self, BLOB};
 use crate::cache::{Cache, CacheError};
+use crate::config::ConfigIdent;
 use crate::input::{BuildInput, BuildInputs, MappedPath, TargetDirectory, TargetPackage};
 use crate::progress::{NoProgress, Progress};
-use crate::target::Target;
+use crate::target::TargetMap;
 use crate::timer::BuildTimer;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -168,7 +169,7 @@ pub enum PackageOutput {
 #[derive(Clone, Deserialize, Debug, PartialEq)]
 pub struct Package {
     /// The name of the service name to be used on the target OS.
-    pub service_name: String,
+    pub service_name: ConfigIdent,
 
     /// Identifies from where the package originates.
     ///
@@ -182,7 +183,7 @@ pub struct Package {
     /// Identifies the targets for which the package should be included.
     ///
     /// If ommitted, the package is assumed to be included for all targets.
-    pub only_for_targets: Option<BTreeMap<String, String>>,
+    pub only_for_targets: Option<TargetMap>,
 
     /// A human-readable string with suggestions for setup if packaging fails.
     #[serde(default)]
@@ -193,7 +194,7 @@ pub struct Package {
 const DEFAULT_VERSION: semver::Version = semver::Version::new(0, 0, 0);
 
 async fn new_zone_archive_builder(
-    package_name: &str,
+    package_name: &ConfigIdent,
     output_directory: &Utf8Path,
 ) -> Result<ArchiveBuilder<GzEncoder<File>>> {
     let tarfile = output_directory.join(format!("{}.tar.gz", package_name));
@@ -203,7 +204,7 @@ async fn new_zone_archive_builder(
 /// Configuration that can modify how a package is built.
 pub struct BuildConfig<'a> {
     /// Describes the [Target] to build the package for.
-    pub target: &'a Target,
+    pub target: &'a TargetMap,
 
     /// Describes how progress will be communicated back to the caller.
     pub progress: &'a dyn Progress,
@@ -212,10 +213,10 @@ pub struct BuildConfig<'a> {
     pub cache_disabled: bool,
 }
 
-static DEFAULT_TARGET: Target = Target(BTreeMap::new());
+static DEFAULT_TARGET: TargetMap = TargetMap(BTreeMap::new());
 static DEFAULT_PROGRESS: NoProgress = NoProgress::new();
 
-impl<'a> Default for BuildConfig<'a> {
+impl Default for BuildConfig<'_> {
     fn default() -> Self {
         Self {
             target: &DEFAULT_TARGET,
@@ -227,19 +228,23 @@ impl<'a> Default for BuildConfig<'a> {
 
 impl Package {
     /// The path of a package once it is built.
-    pub fn get_output_path(&self, name: &str, output_directory: &Utf8Path) -> Utf8PathBuf {
-        output_directory.join(self.get_output_file(name))
+    pub fn get_output_path(&self, id: &ConfigIdent, output_directory: &Utf8Path) -> Utf8PathBuf {
+        output_directory.join(self.get_output_file(id))
     }
 
     /// The path of a package after it has been "stamped" with a version.
-    pub fn get_stamped_output_path(&self, name: &str, output_directory: &Utf8Path) -> Utf8PathBuf {
+    pub fn get_stamped_output_path(
+        &self,
+        name: &ConfigIdent,
+        output_directory: &Utf8Path,
+    ) -> Utf8PathBuf {
         output_directory
             .join("versioned")
             .join(self.get_output_file(name))
     }
 
     /// The filename of a package once it is built.
-    pub fn get_output_file(&self, name: &str) -> String {
+    pub fn get_output_file(&self, name: &ConfigIdent) -> String {
         match self.output {
             PackageOutput::Zone { .. } => format!("{}.tar.gz", name),
             PackageOutput::Tarball => format!("{}.tar", name),
@@ -249,8 +254,8 @@ impl Package {
     #[deprecated = "Use 'Package::create', which now takes a 'BuildConfig', and implements 'Default'"]
     pub async fn create_for_target(
         &self,
-        target: &Target,
-        name: &str,
+        target: &TargetMap,
+        name: &ConfigIdent,
         output_directory: &Utf8Path,
     ) -> Result<File> {
         let build_config = BuildConfig {
@@ -263,7 +268,7 @@ impl Package {
 
     pub async fn create(
         &self,
-        name: &str,
+        name: &ConfigIdent,
         output_directory: &Utf8Path,
         build_config: &BuildConfig<'_>,
     ) -> Result<File> {
@@ -273,7 +278,7 @@ impl Package {
 
     pub async fn stamp(
         &self,
-        name: &str,
+        name: &ConfigIdent,
         output_directory: &Utf8Path,
         version: &semver::Version,
     ) -> Result<Utf8PathBuf> {
@@ -345,8 +350,8 @@ impl Package {
     pub async fn create_with_progress_for_target(
         &self,
         progress: &impl Progress,
-        target: &Target,
-        name: &str,
+        target: &TargetMap,
+        name: &ConfigIdent,
         output_directory: &Utf8Path,
     ) -> Result<File> {
         let config = BuildConfig {
@@ -359,7 +364,7 @@ impl Package {
 
     async fn create_internal(
         &self,
-        name: &str,
+        name: &ConfigIdent,
         output_directory: &Utf8Path,
         config: &BuildConfig<'_>,
     ) -> Result<File> {
@@ -382,7 +387,7 @@ impl Package {
     // Adds the version file to the archive
     fn get_version_input(
         &self,
-        package_name: &str,
+        package_name: &ConfigIdent,
         version: Option<&semver::Version>,
     ) -> BuildInput {
         match &self.output {
@@ -397,7 +402,7 @@ impl Package {
                 let kvs = vec![
                     ("v", "1"),
                     ("t", "layer"),
-                    ("pkg", package_name),
+                    ("pkg", package_name.as_ref()),
                     ("version", version),
                 ];
 
@@ -427,7 +432,7 @@ impl Package {
 
     fn get_paths_inputs(
         &self,
-        target: &Target,
+        target: &TargetMap,
         paths: &Vec<InterpolatedMappedPath>,
     ) -> Result<BuildInputs> {
         let mut inputs = BuildInputs::new();
@@ -514,8 +519,8 @@ impl Package {
 
     fn get_all_inputs(
         &self,
-        package_name: &str,
-        target: &Target,
+        package_name: &ConfigIdent,
+        target: &TargetMap,
         output_directory: &Utf8Path,
         zoned: bool,
         version: Option<&semver::Version>,
@@ -559,7 +564,7 @@ impl Package {
             let dst_directory = match self.output {
                 PackageOutput::Zone { .. } => {
                     let dst = Utf8Path::new("/opt/oxide")
-                        .join(&self.service_name)
+                        .join(self.service_name.as_str())
                         .join("bin");
                     inputs.0.extend(
                         zone_get_all_parent_inputs(&dst)?
@@ -589,7 +594,7 @@ impl Package {
         let destination_path = if zoned {
             zone_archive_path(
                 &Utf8Path::new("/opt/oxide")
-                    .join(&self.service_name)
+                    .join(self.service_name.as_str())
                     .join(BLOB),
             )?
         } else {
@@ -597,7 +602,9 @@ impl Package {
         };
         if let Some(s3_blobs) = self.source.blobs() {
             inputs.0.extend(s3_blobs.iter().map(|blob| {
-                let from = download_directory.join(&self.service_name).join(blob);
+                let from = download_directory
+                    .join(self.service_name.as_str())
+                    .join(blob);
                 let to = destination_path.join(blob);
                 BuildInput::AddBlob {
                     path: MappedPath { from, to },
@@ -608,7 +615,7 @@ impl Package {
         if let Some(buildomat_blobs) = self.source.buildomat_blobs() {
             inputs.0.extend(buildomat_blobs.iter().map(|blob| {
                 let from = download_directory
-                    .join(&self.service_name)
+                    .join(self.service_name.as_str())
                     .join(&blob.artifact);
                 let to = destination_path.join(&blob.artifact);
                 BuildInput::AddBlob {
@@ -623,7 +630,7 @@ impl Package {
     async fn create_zone_package(
         &self,
         timer: &mut BuildTimer,
-        name: &str,
+        name: &ConfigIdent,
         output_directory: &Utf8Path,
         config: &BuildConfig<'_>,
     ) -> Result<File> {
@@ -762,7 +769,7 @@ impl Package {
 
     async fn create_tarball_package(
         &self,
-        name: &str,
+        name: &ConfigIdent,
         output_directory: &Utf8Path,
         config: &BuildConfig<'_>,
     ) -> Result<File> {
@@ -851,7 +858,7 @@ pub struct InterpolatedString(String);
 impl InterpolatedString {
     // Interpret the string for the specified target.
     // Substitutes key/value pairs as necessary.
-    pub fn interpolate(&self, target: &Target) -> Result<String> {
+    pub fn interpolate(&self, target: &TargetMap) -> Result<String> {
         let mut input = self.0.as_str();
         let mut output = String::new();
 
@@ -893,7 +900,7 @@ pub struct InterpolatedMappedPath {
 }
 
 impl InterpolatedMappedPath {
-    fn interpolate(&self, target: &Target) -> Result<MappedPath> {
+    fn interpolate(&self, target: &TargetMap) -> Result<MappedPath> {
         Ok(MappedPath {
             from: Utf8PathBuf::from(self.from.interpolate(target)?),
             to: Utf8PathBuf::from(self.to.interpolate(target)?),
@@ -907,7 +914,7 @@ mod test {
 
     #[test]
     fn interpolate_noop() {
-        let target = Target(BTreeMap::new());
+        let target = TargetMap(BTreeMap::new());
         let is = InterpolatedString(String::from("nothing to change"));
 
         let s = is.interpolate(&target).unwrap();
@@ -916,7 +923,7 @@ mod test {
 
     #[test]
     fn interpolate_single() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         let is = InterpolatedString(String::from("{{key1}}"));
 
@@ -926,7 +933,7 @@ mod test {
 
     #[test]
     fn interpolate_single_with_prefix() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         let is = InterpolatedString(String::from("prefix-{{key1}}"));
 
@@ -936,7 +943,7 @@ mod test {
 
     #[test]
     fn interpolate_single_with_suffix() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         let is = InterpolatedString(String::from("{{key1}}-suffix"));
 
@@ -946,7 +953,7 @@ mod test {
 
     #[test]
     fn interpolate_multiple() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         target.0.insert("key2".to_string(), "value2".to_string());
         let is = InterpolatedString(String::from("{{key1}}-{{key2}}"));
@@ -957,7 +964,7 @@ mod test {
 
     #[test]
     fn interpolate_missing_key() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         let is = InterpolatedString(String::from("{{key3}}"));
 
@@ -972,7 +979,7 @@ mod test {
 
     #[test]
     fn interpolate_missing_closing() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         let is = InterpolatedString(String::from("{{key1"));
 
@@ -992,7 +999,7 @@ mod test {
     // as part of they key -- INCLUDING other "{{" characters.
     #[test]
     fn interpolate_key_as_literal() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("oh{{no".to_string(), "value".to_string());
         let is = InterpolatedString(String::from("{{oh{{no}}"));
 
