@@ -12,12 +12,12 @@ use std::path::Path;
 use thiserror::Error;
 use topological_sort::TopologicalSort;
 
-use super::ConfigIdent;
+use super::PackageName;
 
 /// Describes a set of packages to act upon.
 ///
 /// This structure maps "package name" to "package"
-pub struct PackageMap<'a>(pub BTreeMap<&'a ConfigIdent, &'a Package>);
+pub struct PackageMap<'a>(pub BTreeMap<&'a PackageName, &'a Package>);
 
 // The name of a file which should be created by building a package.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -70,12 +70,12 @@ impl<'a> PackageMap<'a> {
 ///
 /// Returns packages in batches that may be built concurrently.
 pub struct PackageDependencyIter<'a> {
-    lookup_by_output: BTreeMap<OutputFile, (&'a ConfigIdent, &'a Package)>,
+    lookup_by_output: BTreeMap<OutputFile, (&'a PackageName, &'a Package)>,
     outputs: TopologicalSort<OutputFile>,
 }
 
 impl<'a> Iterator for PackageDependencyIter<'a> {
-    type Item = Vec<(&'a ConfigIdent, &'a Package)>;
+    type Item = Vec<(&'a PackageName, &'a Package)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.outputs.is_empty() {
@@ -105,7 +105,7 @@ impl<'a> Iterator for PackageDependencyIter<'a> {
 pub struct Config {
     /// Packages to be built and installed.
     #[serde(default, rename = "package")]
-    pub packages: BTreeMap<ConfigIdent, Package>,
+    pub packages: BTreeMap<PackageName, Package>,
 }
 
 impl Config {
@@ -156,22 +156,24 @@ pub fn parse<P: AsRef<Path>>(path: P) -> Result<Config, ParseError> {
 
 #[cfg(test)]
 mod test {
+    use crate::config::ServiceName;
+
     use super::*;
 
     #[test]
     fn test_order() {
-        let pkg_a_name = ConfigIdent::new_const("pkg-a");
+        let pkg_a_name = PackageName::new_const("pkg-a");
         let pkg_a = Package {
-            service_name: ConfigIdent::new_const("a"),
+            service_name: ServiceName::new_const("a"),
             source: PackageSource::Manual,
             output: PackageOutput::Tarball,
             only_for_targets: None,
             setup_hint: None,
         };
 
-        let pkg_b_name = ConfigIdent::new_const("pkg-b");
+        let pkg_b_name = PackageName::new_const("pkg-b");
         let pkg_b = Package {
-            service_name: ConfigIdent::new_const("b"),
+            service_name: ServiceName::new_const("b"),
             source: PackageSource::Composite {
                 packages: vec![pkg_a.get_output_file(&pkg_a_name)],
             },
@@ -200,10 +202,10 @@ mod test {
     #[test]
     #[should_panic(expected = "cyclic dependency in package manifest")]
     fn test_cyclic_dependency() {
-        let pkg_a_name = ConfigIdent::new_const("pkg-a");
-        let pkg_b_name = ConfigIdent::new_const("pkg-b");
+        let pkg_a_name = PackageName::new_const("pkg-a");
+        let pkg_b_name = PackageName::new_const("pkg-b");
         let pkg_a = Package {
-            service_name: ConfigIdent::new_const("a"),
+            service_name: ServiceName::new_const("a"),
             source: PackageSource::Composite {
                 packages: vec![String::from("pkg-b.tar")],
             },
@@ -212,7 +214,7 @@ mod test {
             setup_hint: None,
         };
         let pkg_b = Package {
-            service_name: ConfigIdent::new_const("b"),
+            service_name: ServiceName::new_const("b"),
             source: PackageSource::Composite {
                 packages: vec![String::from("pkg-a.tar")],
             },
@@ -238,9 +240,9 @@ mod test {
     #[test]
     #[should_panic(expected = "Could not find a package which creates 'pkg-b.tar'")]
     fn test_missing_dependency() {
-        let pkg_a_name = ConfigIdent::new_const("pkg-a");
+        let pkg_a_name = PackageName::new_const("pkg-a");
         let pkg_a = Package {
-            service_name: ConfigIdent::new_const("a"),
+            service_name: ServiceName::new_const("a"),
             source: PackageSource::Composite {
                 packages: vec![String::from("pkg-b.tar")],
             },
