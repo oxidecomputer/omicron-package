@@ -659,7 +659,7 @@ impl Package {
             .context("Identifying all input paths")?;
         progress.increment_total(inputs.0.len() as u64);
 
-        let output_file = self.get_output_file(&name);
+        let output_file = self.get_output_file(name);
         let output_path = output_directory.join(&output_file);
 
         // Decide whether or not to use a cached copy of the zone package
