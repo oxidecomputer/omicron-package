@@ -12,13 +12,16 @@ mod test {
     use tar::Archive;
 
     use omicron_zone_package::blob::download;
-    use omicron_zone_package::config::{self, ConfigIdent};
+    use omicron_zone_package::config::{self, PackageName, ServiceName};
     use omicron_zone_package::package::BuildConfig;
     use omicron_zone_package::progress::NoProgress;
     use omicron_zone_package::target::TargetMap;
 
-    const MY_PACKAGE: ConfigIdent = ConfigIdent::new_const("my-package");
-    const MY_SERVICE: ConfigIdent = ConfigIdent::new_const("my-service");
+    const MY_PACKAGE: PackageName = PackageName::new_const("my-package");
+
+    /// The package name called the same as the service name.
+    const MY_SERVICE_PACKAGE: PackageName = PackageName::new_const("my-service");
+    const MY_SERVICE: ServiceName = ServiceName::new_const("my-service");
 
     fn entry_path<'a, R>(entry: &tar::Entry<'a, R>) -> Utf8PathBuf
     where
@@ -61,18 +64,18 @@ mod test {
     async fn test_package_as_zone() {
         // Parse the configuration
         let cfg = config::parse("tests/service-a/cfg.toml").unwrap();
-        let package = cfg.packages.get(&MY_SERVICE).unwrap();
+        let package = cfg.packages.get(&MY_SERVICE_PACKAGE).unwrap();
 
         // Create the packaged file
         let out = camino_tempfile::tempdir().unwrap();
         let build_config = BuildConfig::default();
         package
-            .create(&MY_SERVICE, out.path(), &build_config)
+            .create(&MY_SERVICE_PACKAGE, out.path(), &build_config)
             .await
             .unwrap();
 
         // Verify the contents
-        let path = package.get_output_path(&MY_SERVICE, out.path());
+        let path = package.get_output_path_for_service(out.path());
         assert!(path.exists());
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
@@ -99,18 +102,18 @@ mod test {
     async fn test_rust_package_as_zone() {
         // Parse the configuration
         let cfg = config::parse("tests/service-b/cfg.toml").unwrap();
-        let package = cfg.packages.get(&MY_SERVICE).unwrap();
+        let package = cfg.packages.get(&MY_SERVICE_PACKAGE).unwrap();
 
         // Create the packaged file
         let out = camino_tempfile::tempdir().unwrap();
         let build_config = BuildConfig::default();
         package
-            .create(&MY_SERVICE, out.path(), &build_config)
+            .create(&MY_SERVICE_PACKAGE, out.path(), &build_config)
             .await
             .unwrap();
 
         // Verify the contents
-        let path = package.get_output_path(&MY_SERVICE, out.path());
+        let path = package.get_output_path_for_service(out.path());
         assert!(path.exists());
         let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
         let mut archive = Archive::new(gzr);
@@ -141,18 +144,18 @@ mod test {
     async fn test_rust_package_as_tarball() {
         // Parse the configuration
         let cfg = config::parse("tests/service-c/cfg.toml").unwrap();
-        let package = cfg.packages.get(&MY_SERVICE).unwrap();
+        let package = cfg.packages.get(&MY_SERVICE_PACKAGE).unwrap();
 
         // Create the packaged file
         let out = camino_tempfile::tempdir().unwrap();
         let build_config = BuildConfig::default();
         package
-            .create(&MY_SERVICE, out.path(), &build_config)
+            .create(&MY_SERVICE_PACKAGE, out.path(), &build_config)
             .await
             .unwrap();
 
         // Verify the contents
-        let path = package.get_output_path(&MY_SERVICE, out.path());
+        let path = package.get_output_path_for_service(out.path());
         assert!(path.exists());
         let mut archive = Archive::new(File::open(path).unwrap());
         let mut ents = archive.entries().unwrap();
@@ -168,7 +171,7 @@ mod test {
         // Try stamping it, verify the contents again
         let expected_semver = semver::Version::new(3, 3, 3);
         let path = package
-            .stamp(&MY_SERVICE, out.path(), &expected_semver)
+            .stamp(&MY_SERVICE_PACKAGE, out.path(), &expected_semver)
             .await
             .unwrap();
         assert!(path.exists());
@@ -231,8 +234,8 @@ mod test {
         assert_eq!(
             batch_pkg_names,
             vec![
-                &ConfigIdent::new_const("pkg-1"),
-                &ConfigIdent::new_const("pkg-2"),
+                &PackageName::new_const("pkg-1"),
+                &PackageName::new_const("pkg-2"),
             ]
         );
         let build_config = BuildConfig::default();
@@ -247,7 +250,7 @@ mod test {
         // Build the composite package
         let batch = build_order.next().expect("Missing dependency batch");
         let batch_pkg_names: Vec<_> = batch.iter().map(|(name, _)| *name).collect();
-        let package_name = ConfigIdent::new_const("pkg-3");
+        let package_name = PackageName::new_const("pkg-3");
         assert_eq!(batch_pkg_names, vec![&package_name]);
         let package = cfg.packages.get(&package_name).unwrap();
         let build_config = BuildConfig::default();

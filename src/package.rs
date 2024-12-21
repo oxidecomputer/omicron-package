@@ -10,7 +10,7 @@ use crate::archive::{
 };
 use crate::blob::{self, BLOB};
 use crate::cache::{Cache, CacheError};
-use crate::config::ConfigIdent;
+use crate::config::{PackageName, ServiceName};
 use crate::input::{BuildInput, BuildInputs, MappedPath, TargetDirectory, TargetPackage};
 use crate::progress::{NoProgress, Progress};
 use crate::target::TargetMap;
@@ -169,7 +169,7 @@ pub enum PackageOutput {
 #[derive(Clone, Deserialize, Debug, PartialEq)]
 pub struct Package {
     /// The name of the service name to be used on the target OS.
-    pub service_name: ConfigIdent,
+    pub service_name: ServiceName,
 
     /// Identifies from where the package originates.
     ///
@@ -194,7 +194,7 @@ pub struct Package {
 const DEFAULT_VERSION: semver::Version = semver::Version::new(0, 0, 0);
 
 async fn new_zone_archive_builder(
-    package_name: &ConfigIdent,
+    package_name: &PackageName,
     output_directory: &Utf8Path,
 ) -> Result<ArchiveBuilder<GzEncoder<File>>> {
     let tarfile = output_directory.join(format!("{}.tar.gz", package_name));
@@ -228,14 +228,19 @@ impl Default for BuildConfig<'_> {
 
 impl Package {
     /// The path of a package once it is built.
-    pub fn get_output_path(&self, id: &ConfigIdent, output_directory: &Utf8Path) -> Utf8PathBuf {
+    pub fn get_output_path(&self, id: &PackageName, output_directory: &Utf8Path) -> Utf8PathBuf {
         output_directory.join(self.get_output_file(id))
+    }
+
+    /// The path of the service name with respect to the install directory.
+    pub fn get_output_path_for_service(&self, install_directory: &Utf8Path) -> Utf8PathBuf {
+        install_directory.join(self.get_output_file_for_service())
     }
 
     /// The path of a package after it has been "stamped" with a version.
     pub fn get_stamped_output_path(
         &self,
-        name: &ConfigIdent,
+        name: &PackageName,
         output_directory: &Utf8Path,
     ) -> Utf8PathBuf {
         output_directory
@@ -244,10 +249,17 @@ impl Package {
     }
 
     /// The filename of a package once it is built.
-    pub fn get_output_file(&self, name: &ConfigIdent) -> String {
+    pub fn get_output_file(&self, name: &PackageName) -> String {
         match self.output {
             PackageOutput::Zone { .. } => format!("{}.tar.gz", name),
             PackageOutput::Tarball => format!("{}.tar", name),
+        }
+    }
+
+    pub fn get_output_file_for_service(&self) -> String {
+        match self.output {
+            PackageOutput::Zone { .. } => format!("{}.tar.gz", self.service_name),
+            PackageOutput::Tarball => format!("{}.tar", self.service_name),
         }
     }
 
@@ -255,7 +267,7 @@ impl Package {
     pub async fn create_for_target(
         &self,
         target: &TargetMap,
-        name: &ConfigIdent,
+        name: &PackageName,
         output_directory: &Utf8Path,
     ) -> Result<File> {
         let build_config = BuildConfig {
@@ -268,7 +280,7 @@ impl Package {
 
     pub async fn create(
         &self,
-        name: &ConfigIdent,
+        name: &PackageName,
         output_directory: &Utf8Path,
         build_config: &BuildConfig<'_>,
     ) -> Result<File> {
@@ -278,7 +290,7 @@ impl Package {
 
     pub async fn stamp(
         &self,
-        name: &ConfigIdent,
+        name: &PackageName,
         output_directory: &Utf8Path,
         version: &semver::Version,
     ) -> Result<Utf8PathBuf> {
@@ -351,7 +363,7 @@ impl Package {
         &self,
         progress: &impl Progress,
         target: &TargetMap,
-        name: &ConfigIdent,
+        name: &PackageName,
         output_directory: &Utf8Path,
     ) -> Result<File> {
         let config = BuildConfig {
@@ -364,7 +376,7 @@ impl Package {
 
     async fn create_internal(
         &self,
-        name: &ConfigIdent,
+        name: &PackageName,
         output_directory: &Utf8Path,
         config: &BuildConfig<'_>,
     ) -> Result<File> {
@@ -387,7 +399,7 @@ impl Package {
     // Adds the version file to the archive
     fn get_version_input(
         &self,
-        package_name: &ConfigIdent,
+        package_name: &PackageName,
         version: Option<&semver::Version>,
     ) -> BuildInput {
         match &self.output {
@@ -519,7 +531,7 @@ impl Package {
 
     fn get_all_inputs(
         &self,
-        package_name: &ConfigIdent,
+        package_name: &PackageName,
         target: &TargetMap,
         output_directory: &Utf8Path,
         zoned: bool,
@@ -630,7 +642,7 @@ impl Package {
     async fn create_zone_package(
         &self,
         timer: &mut BuildTimer,
-        name: &ConfigIdent,
+        name: &PackageName,
         output_directory: &Utf8Path,
         config: &BuildConfig<'_>,
     ) -> Result<File> {
@@ -769,7 +781,7 @@ impl Package {
 
     async fn create_tarball_package(
         &self,
-        name: &ConfigIdent,
+        name: &PackageName,
         output_directory: &Utf8Path,
         config: &BuildConfig<'_>,
     ) -> Result<File> {
