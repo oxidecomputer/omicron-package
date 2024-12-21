@@ -12,7 +12,7 @@ use std::path::Path;
 use thiserror::Error;
 use topological_sort::TopologicalSort;
 
-use super::PackageName;
+use super::{PackageName, PresetName};
 
 /// Describes a set of packages to act upon.
 ///
@@ -106,6 +106,10 @@ pub struct Config {
     /// Packages to be built and installed.
     #[serde(default, rename = "package")]
     pub packages: BTreeMap<PackageName, Package>,
+
+    /// Target configuration.
+    #[serde(default)]
+    pub target: TargetConfig,
 }
 
 impl Config {
@@ -132,6 +136,14 @@ impl Config {
                 .collect(),
         )
     }
+}
+
+/// Configuration for targets, including preset configuration.
+#[derive(Clone, Deserialize, Debug, Default)]
+pub struct TargetConfig {
+    /// Preset configuration for targets.
+    #[serde(default, rename = "preset")]
+    pub presets: BTreeMap<PresetName, TargetMap>,
 }
 
 /// Errors which may be returned when parsing the server configuration.
@@ -187,6 +199,7 @@ mod test {
                 (pkg_a_name.clone(), pkg_a.clone()),
                 (pkg_b_name.clone(), pkg_b.clone()),
             ]),
+            target: TargetConfig::default(),
         };
 
         let mut order = cfg.packages_to_build(&TargetMap::default()).build_order();
@@ -228,6 +241,7 @@ mod test {
                 (pkg_a_name.clone(), pkg_a.clone()),
                 (pkg_b_name.clone(), pkg_b.clone()),
             ]),
+            target: TargetConfig::default(),
         };
 
         let mut order = cfg.packages_to_build(&TargetMap::default()).build_order();
@@ -253,6 +267,7 @@ mod test {
 
         let cfg = Config {
             packages: BTreeMap::from([(pkg_a_name.clone(), pkg_a.clone())]),
+            target: TargetConfig::default(),
         };
 
         let mut order = cfg.packages_to_build(&TargetMap::default()).build_order();

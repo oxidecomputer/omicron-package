@@ -174,6 +174,10 @@ impl FromStr for ConfigIdent {
     }
 }
 
+// The `Deserialize` implementation for `ConfigIdent` must be manually
+// implemented, because it must go through validation. The `Serialize`
+// implementation can be derived because `ConfigIdent` serializes as a regular
+// string.
 impl<'de> Deserialize<'de> for ConfigIdent {
     fn deserialize<D>(deserializer: D) -> Result<ConfigIdent, D::Error>
     where
