@@ -5,7 +5,7 @@
 //! Configuration for a package.
 
 use crate::package::{Package, PackageOutput, PackageSource};
-use crate::target::Target;
+use crate::target::TargetMap;
 use serde_derive::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -110,7 +110,7 @@ pub struct Config {
 
 impl Config {
     /// Returns target packages to be assembled on the builder machine.
-    pub fn packages_to_build(&self, target: &Target) -> PackageMap<'_> {
+    pub fn packages_to_build(&self, target: &TargetMap) -> PackageMap<'_> {
         PackageMap(
             self.packages
                 .iter()
@@ -120,7 +120,7 @@ impl Config {
     }
 
     /// Returns target packages which should execute on the deployment machine.
-    pub fn packages_to_deploy(&self, target: &Target) -> PackageMap<'_> {
+    pub fn packages_to_deploy(&self, target: &TargetMap) -> PackageMap<'_> {
         let all_packages = self.packages_to_build(target).0;
         PackageMap(
             all_packages
@@ -189,7 +189,7 @@ mod test {
             ]),
         };
 
-        let mut order = cfg.packages_to_build(&Target::default()).build_order();
+        let mut order = cfg.packages_to_build(&TargetMap::default()).build_order();
         // "pkg-a" comes first, because "pkg-b" depends on it.
         assert_eq!(order.next(), Some(vec![(&pkg_a_name, &pkg_a)]));
         assert_eq!(order.next(), Some(vec![(&pkg_b_name, &pkg_b)]));
@@ -230,7 +230,7 @@ mod test {
             ]),
         };
 
-        let mut order = cfg.packages_to_build(&Target::default()).build_order();
+        let mut order = cfg.packages_to_build(&TargetMap::default()).build_order();
         order.next();
     }
 
@@ -255,7 +255,7 @@ mod test {
             packages: BTreeMap::from([(pkg_a_name.clone(), pkg_a.clone())]),
         };
 
-        let mut order = cfg.packages_to_build(&Target::default()).build_order();
+        let mut order = cfg.packages_to_build(&TargetMap::default()).build_order();
         order.next();
     }
 }

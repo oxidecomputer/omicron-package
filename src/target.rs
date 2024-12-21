@@ -3,14 +3,19 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use crate::package::Package;
+use serde::Deserialize;
 use std::collections::BTreeMap;
 
-/// A target describes what platform and configuration we're trying
-/// to deploy on.
-#[derive(Clone, Debug, Default)]
-pub struct Target(pub BTreeMap<String, String>);
+/// Describes what platform and configuration we're trying to deploy on.
+///
+/// For flexibility, this is an arbitrary key-value map without any attached
+/// semantics to particular keys. Those semantics are provided by the consumers
+/// of this tooling within omicron.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(transparent)]
+pub struct TargetMap(pub BTreeMap<String, String>);
 
-impl Target {
+impl TargetMap {
     // Returns true if this target should include the package.
     pub(crate) fn includes_package(&self, pkg: &Package) -> bool {
         let valid_targets = if let Some(targets) = &pkg.only_for_targets {
@@ -24,7 +29,7 @@ impl Target {
 
         // For each of the targets permitted by the package, check if
         // the current target matches.
-        for (k, v) in valid_targets {
+        for (k, v) in &valid_targets.0 {
             let target_value = if let Some(target_value) = self.0.get(k) {
                 target_value
             } else {
@@ -39,7 +44,7 @@ impl Target {
     }
 }
 
-impl std::fmt::Display for Target {
+impl std::fmt::Display for TargetMap {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         for (key, value) in &self.0 {
             write!(f, "{}={} ", key, value)?;
@@ -54,7 +59,7 @@ pub enum TargetParseError {
     MissingEquals(String),
 }
 
-impl std::str::FromStr for Target {
+impl std::str::FromStr for TargetMap {
     type Err = TargetParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -66,6 +71,6 @@ impl std::str::FromStr for Target {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
             })
             .collect::<Result<BTreeMap<String, String>, _>>()?;
-        Ok(Target(kvs))
+        Ok(TargetMap(kvs))
     }
 }

@@ -15,7 +15,7 @@ mod test {
     use omicron_zone_package::config::{self, PackageName, ServiceName};
     use omicron_zone_package::package::BuildConfig;
     use omicron_zone_package::progress::NoProgress;
-    use omicron_zone_package::target::Target;
+    use omicron_zone_package::target::TargetMap;
 
     const MY_PACKAGE: PackageName = PackageName::new_const("my-package");
 
@@ -224,7 +224,7 @@ mod test {
         let out = camino_tempfile::tempdir().unwrap();
 
         // Ask for the order of packages to-be-built
-        let packages = cfg.packages_to_build(&Target::default());
+        let packages = cfg.packages_to_build(&TargetMap::default());
         let mut build_order = packages.build_order();
 
         // Build the dependencies first.

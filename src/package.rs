@@ -13,7 +13,7 @@ use crate::cache::{Cache, CacheError};
 use crate::config::{PackageName, ServiceName};
 use crate::input::{BuildInput, BuildInputs, MappedPath, TargetDirectory, TargetPackage};
 use crate::progress::{NoProgress, Progress};
-use crate::target::Target;
+use crate::target::TargetMap;
 use crate::timer::BuildTimer;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -183,7 +183,7 @@ pub struct Package {
     /// Identifies the targets for which the package should be included.
     ///
     /// If ommitted, the package is assumed to be included for all targets.
-    pub only_for_targets: Option<BTreeMap<String, String>>,
+    pub only_for_targets: Option<TargetMap>,
 
     /// A human-readable string with suggestions for setup if packaging fails.
     #[serde(default)]
@@ -204,7 +204,7 @@ async fn new_zone_archive_builder(
 /// Configuration that can modify how a package is built.
 pub struct BuildConfig<'a> {
     /// Describes the [Target] to build the package for.
-    pub target: &'a Target,
+    pub target: &'a TargetMap,
 
     /// Describes how progress will be communicated back to the caller.
     pub progress: &'a dyn Progress,
@@ -213,7 +213,7 @@ pub struct BuildConfig<'a> {
     pub cache_disabled: bool,
 }
 
-static DEFAULT_TARGET: Target = Target(BTreeMap::new());
+static DEFAULT_TARGET: TargetMap = TargetMap(BTreeMap::new());
 static DEFAULT_PROGRESS: NoProgress = NoProgress::new();
 
 impl Default for BuildConfig<'_> {
@@ -266,7 +266,7 @@ impl Package {
     #[deprecated = "Use 'Package::create', which now takes a 'BuildConfig', and implements 'Default'"]
     pub async fn create_for_target(
         &self,
-        target: &Target,
+        target: &TargetMap,
         name: &PackageName,
         output_directory: &Utf8Path,
     ) -> Result<File> {
@@ -362,7 +362,7 @@ impl Package {
     pub async fn create_with_progress_for_target(
         &self,
         progress: &impl Progress,
-        target: &Target,
+        target: &TargetMap,
         name: &PackageName,
         output_directory: &Utf8Path,
     ) -> Result<File> {
@@ -444,7 +444,7 @@ impl Package {
 
     fn get_paths_inputs(
         &self,
-        target: &Target,
+        target: &TargetMap,
         paths: &Vec<InterpolatedMappedPath>,
     ) -> Result<BuildInputs> {
         let mut inputs = BuildInputs::new();
@@ -532,7 +532,7 @@ impl Package {
     fn get_all_inputs(
         &self,
         package_name: &PackageName,
-        target: &Target,
+        target: &TargetMap,
         output_directory: &Utf8Path,
         zoned: bool,
         version: Option<&semver::Version>,
@@ -870,7 +870,7 @@ pub struct InterpolatedString(String);
 impl InterpolatedString {
     // Interpret the string for the specified target.
     // Substitutes key/value pairs as necessary.
-    pub fn interpolate(&self, target: &Target) -> Result<String> {
+    pub fn interpolate(&self, target: &TargetMap) -> Result<String> {
         let mut input = self.0.as_str();
         let mut output = String::new();
 
@@ -912,7 +912,7 @@ pub struct InterpolatedMappedPath {
 }
 
 impl InterpolatedMappedPath {
-    fn interpolate(&self, target: &Target) -> Result<MappedPath> {
+    fn interpolate(&self, target: &TargetMap) -> Result<MappedPath> {
         Ok(MappedPath {
             from: Utf8PathBuf::from(self.from.interpolate(target)?),
             to: Utf8PathBuf::from(self.to.interpolate(target)?),
@@ -926,7 +926,7 @@ mod test {
 
     #[test]
     fn interpolate_noop() {
-        let target = Target(BTreeMap::new());
+        let target = TargetMap(BTreeMap::new());
         let is = InterpolatedString(String::from("nothing to change"));
 
         let s = is.interpolate(&target).unwrap();
@@ -935,7 +935,7 @@ mod test {
 
     #[test]
     fn interpolate_single() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         let is = InterpolatedString(String::from("{{key1}}"));
 
@@ -945,7 +945,7 @@ mod test {
 
     #[test]
     fn interpolate_single_with_prefix() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         let is = InterpolatedString(String::from("prefix-{{key1}}"));
 
@@ -955,7 +955,7 @@ mod test {
 
     #[test]
     fn interpolate_single_with_suffix() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         let is = InterpolatedString(String::from("{{key1}}-suffix"));
 
@@ -965,7 +965,7 @@ mod test {
 
     #[test]
     fn interpolate_multiple() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         target.0.insert("key2".to_string(), "value2".to_string());
         let is = InterpolatedString(String::from("{{key1}}-{{key2}}"));
@@ -976,7 +976,7 @@ mod test {
 
     #[test]
     fn interpolate_missing_key() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         let is = InterpolatedString(String::from("{{key3}}"));
 
@@ -991,7 +991,7 @@ mod test {
 
     #[test]
     fn interpolate_missing_closing() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("key1".to_string(), "value1".to_string());
         let is = InterpolatedString(String::from("{{key1"));
 
@@ -1011,7 +1011,7 @@ mod test {
     // as part of they key -- INCLUDING other "{{" characters.
     #[test]
     fn interpolate_key_as_literal() {
-        let mut target = Target(BTreeMap::new());
+        let mut target = TargetMap(BTreeMap::new());
         target.0.insert("oh{{no".to_string(), "value".to_string());
         let is = InterpolatedString(String::from("{{oh{{no}}"));
 
