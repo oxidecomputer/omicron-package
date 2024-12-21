@@ -10,6 +10,7 @@ use crate::archive::{
 };
 use crate::blob::{self, BLOB};
 use crate::cache::{Cache, CacheError};
+use crate::config::{PackageName, ServiceName};
 use crate::input::{BuildInput, BuildInputs, MappedPath, TargetDirectory, TargetPackage};
 use crate::progress::{NoProgress, Progress};
 use crate::target::Target;
@@ -168,7 +169,7 @@ pub enum PackageOutput {
 #[derive(Clone, Deserialize, Debug, PartialEq)]
 pub struct Package {
     /// The name of the service name to be used on the target OS.
-    pub service_name: String,
+    pub service_name: ServiceName,
 
     /// Identifies from where the package originates.
     ///
@@ -193,7 +194,7 @@ pub struct Package {
 const DEFAULT_VERSION: semver::Version = semver::Version::new(0, 0, 0);
 
 async fn new_zone_archive_builder(
-    package_name: &str,
+    package_name: &PackageName,
     output_directory: &Utf8Path,
 ) -> Result<ArchiveBuilder<GzEncoder<File>>> {
     let tarfile = output_directory.join(format!("{}.tar.gz", package_name));
@@ -227,22 +228,38 @@ impl Default for BuildConfig<'_> {
 
 impl Package {
     /// The path of a package once it is built.
-    pub fn get_output_path(&self, name: &str, output_directory: &Utf8Path) -> Utf8PathBuf {
-        output_directory.join(self.get_output_file(name))
+    pub fn get_output_path(&self, id: &PackageName, output_directory: &Utf8Path) -> Utf8PathBuf {
+        output_directory.join(self.get_output_file(id))
+    }
+
+    /// The path of the service name with respect to the install directory.
+    pub fn get_output_path_for_service(&self, install_directory: &Utf8Path) -> Utf8PathBuf {
+        install_directory.join(self.get_output_file_for_service())
     }
 
     /// The path of a package after it has been "stamped" with a version.
-    pub fn get_stamped_output_path(&self, name: &str, output_directory: &Utf8Path) -> Utf8PathBuf {
+    pub fn get_stamped_output_path(
+        &self,
+        name: &PackageName,
+        output_directory: &Utf8Path,
+    ) -> Utf8PathBuf {
         output_directory
             .join("versioned")
             .join(self.get_output_file(name))
     }
 
     /// The filename of a package once it is built.
-    pub fn get_output_file(&self, name: &str) -> String {
+    pub fn get_output_file(&self, name: &PackageName) -> String {
         match self.output {
             PackageOutput::Zone { .. } => format!("{}.tar.gz", name),
             PackageOutput::Tarball => format!("{}.tar", name),
+        }
+    }
+
+    pub fn get_output_file_for_service(&self) -> String {
+        match self.output {
+            PackageOutput::Zone { .. } => format!("{}.tar.gz", self.service_name),
+            PackageOutput::Tarball => format!("{}.tar", self.service_name),
         }
     }
 
@@ -250,7 +267,7 @@ impl Package {
     pub async fn create_for_target(
         &self,
         target: &Target,
-        name: &str,
+        name: &PackageName,
         output_directory: &Utf8Path,
     ) -> Result<File> {
         let build_config = BuildConfig {
@@ -263,7 +280,7 @@ impl Package {
 
     pub async fn create(
         &self,
-        name: &str,
+        name: &PackageName,
         output_directory: &Utf8Path,
         build_config: &BuildConfig<'_>,
     ) -> Result<File> {
@@ -273,7 +290,7 @@ impl Package {
 
     pub async fn stamp(
         &self,
-        name: &str,
+        name: &PackageName,
         output_directory: &Utf8Path,
         version: &semver::Version,
     ) -> Result<Utf8PathBuf> {
@@ -346,7 +363,7 @@ impl Package {
         &self,
         progress: &impl Progress,
         target: &Target,
-        name: &str,
+        name: &PackageName,
         output_directory: &Utf8Path,
     ) -> Result<File> {
         let config = BuildConfig {
@@ -359,7 +376,7 @@ impl Package {
 
     async fn create_internal(
         &self,
-        name: &str,
+        name: &PackageName,
         output_directory: &Utf8Path,
         config: &BuildConfig<'_>,
     ) -> Result<File> {
@@ -382,7 +399,7 @@ impl Package {
     // Adds the version file to the archive
     fn get_version_input(
         &self,
-        package_name: &str,
+        package_name: &PackageName,
         version: Option<&semver::Version>,
     ) -> BuildInput {
         match &self.output {
@@ -397,7 +414,7 @@ impl Package {
                 let kvs = vec![
                     ("v", "1"),
                     ("t", "layer"),
-                    ("pkg", package_name),
+                    ("pkg", package_name.as_ref()),
                     ("version", version),
                 ];
 
@@ -514,7 +531,7 @@ impl Package {
 
     fn get_all_inputs(
         &self,
-        package_name: &str,
+        package_name: &PackageName,
         target: &Target,
         output_directory: &Utf8Path,
         zoned: bool,
@@ -559,7 +576,7 @@ impl Package {
             let dst_directory = match self.output {
                 PackageOutput::Zone { .. } => {
                     let dst = Utf8Path::new("/opt/oxide")
-                        .join(&self.service_name)
+                        .join(self.service_name.as_str())
                         .join("bin");
                     inputs.0.extend(
                         zone_get_all_parent_inputs(&dst)?
@@ -589,7 +606,7 @@ impl Package {
         let destination_path = if zoned {
             zone_archive_path(
                 &Utf8Path::new("/opt/oxide")
-                    .join(&self.service_name)
+                    .join(self.service_name.as_str())
                     .join(BLOB),
             )?
         } else {
@@ -597,7 +614,9 @@ impl Package {
         };
         if let Some(s3_blobs) = self.source.blobs() {
             inputs.0.extend(s3_blobs.iter().map(|blob| {
-                let from = download_directory.join(&self.service_name).join(blob);
+                let from = download_directory
+                    .join(self.service_name.as_str())
+                    .join(blob);
                 let to = destination_path.join(blob);
                 BuildInput::AddBlob {
                     path: MappedPath { from, to },
@@ -608,7 +627,7 @@ impl Package {
         if let Some(buildomat_blobs) = self.source.buildomat_blobs() {
             inputs.0.extend(buildomat_blobs.iter().map(|blob| {
                 let from = download_directory
-                    .join(&self.service_name)
+                    .join(self.service_name.as_str())
                     .join(&blob.artifact);
                 let to = destination_path.join(&blob.artifact);
                 BuildInput::AddBlob {
@@ -623,7 +642,7 @@ impl Package {
     async fn create_zone_package(
         &self,
         timer: &mut BuildTimer,
-        name: &str,
+        name: &PackageName,
         output_directory: &Utf8Path,
         config: &BuildConfig<'_>,
     ) -> Result<File> {
@@ -762,7 +781,7 @@ impl Package {
 
     async fn create_tarball_package(
         &self,
-        name: &str,
+        name: &PackageName,
         output_directory: &Utf8Path,
         config: &BuildConfig<'_>,
     ) -> Result<File> {
