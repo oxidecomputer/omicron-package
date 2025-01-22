@@ -78,7 +78,7 @@ pub struct PrebuiltBlob {
 }
 
 /// Describes the origin of an externally-built package.
-#[derive(Clone, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PackageSource {
     /// Describes a package which should be assembled locally.
@@ -149,7 +149,7 @@ impl PackageSource {
 }
 
 /// Describes the output format of the package.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PackageOutput {
     /// A complete zone image, ready to be deployed to the target.
@@ -166,7 +166,7 @@ pub enum PackageOutput {
 }
 
 /// A single package.
-#[derive(Clone, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq)]
 pub struct Package {
     /// The name of the service name to be used on the target OS.
     pub service_name: ServiceName,
@@ -840,7 +840,7 @@ impl Package {
 }
 
 /// Describes configuration for a package which contains a Rust binary.
-#[derive(Clone, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq)]
 pub struct RustPackage {
     /// The name of the compiled binary to be used.
     // TODO: Could be extrapolated to "produced build artifacts", we don't
@@ -864,7 +864,7 @@ impl RustPackage {
 }
 
 /// A string which can be modified with key-value pairs.
-#[derive(Clone, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq)]
 pub struct InterpolatedString(String);
 
 impl InterpolatedString {
@@ -903,7 +903,7 @@ impl InterpolatedString {
 ///
 /// These paths may require target-specific interpretation before being
 /// transformed to an actual [MappedPath].
-#[derive(Clone, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq)]
 pub struct InterpolatedMappedPath {
     /// Source path.
     pub from: InterpolatedString,
