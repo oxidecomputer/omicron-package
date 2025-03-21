@@ -7,6 +7,7 @@
 use crate::package::{Package, PackageOutput, PackageSource};
 use crate::target::TargetMap;
 use serde_derive::Deserialize;
+use serde_derive::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
@@ -101,7 +102,7 @@ impl<'a> Iterator for PackageDependencyIter<'a> {
 }
 
 /// Describes the configuration for a set of packages.
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct Config {
     /// Packages to be built and installed.
     #[serde(default, rename = "package")]
@@ -139,7 +140,7 @@ impl Config {
 }
 
 /// Configuration for targets, including preset configuration.
-#[derive(Clone, Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Serialize, Debug, Default)]
 pub struct TargetConfig {
     /// Preset configuration for targets.
     #[serde(default, rename = "preset")]

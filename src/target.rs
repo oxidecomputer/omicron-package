@@ -4,6 +4,7 @@
 
 use crate::package::Package;
 use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
 
 /// Describes what platform and configuration we're trying to deploy on.
@@ -11,7 +12,7 @@ use std::collections::BTreeMap;
 /// For flexibility, this is an arbitrary key-value map without any attached
 /// semantics to particular keys. Those semantics are provided by the consumers
 /// of this tooling within omicron.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct TargetMap(pub BTreeMap<String, String>);
 
