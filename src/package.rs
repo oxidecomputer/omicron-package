@@ -769,6 +769,15 @@ impl Package {
                 blob::download(progress, blob, &blob_path)
                     .await
                     .with_context(|| format!("failed to download blob: {}", blob.get_url()))?;
+
+                let src = &blob_path;
+                let dst = &path.to;
+                progress.set_message(format!("adding file: {}", src).into());
+                archive
+                    .builder
+                    .append_path_with_name_async(src, dst)
+                    .await
+                    .context(format!("Failed to add file '{}' to '{}'", src, dst,))?;
             }
             BuildInput::AddPackage(component_package) => {
                 progress.set_message(format!("adding package: {}", component_package.0).into());
