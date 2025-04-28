@@ -603,6 +603,14 @@ impl Package {
     fn get_blobs_inputs(&self, download_directory: &Utf8Path, zoned: bool) -> Result<BuildInputs> {
         let mut inputs = BuildInputs::new();
 
+        // If there are no blobs in the source description, there's no work to
+        // do. It's important to short-circuit here to avoid adding an empty
+        // blob directory entry to zone archives that won't actually contain
+        // any blobs.
+        if self.source.blobs().is_none() && self.source.buildomat_blobs().is_none() {
+            return Ok(inputs);
+        }
+
         let destination_path = if zoned {
             let dst = Utf8Path::new("/opt/oxide")
                 .join(self.service_name.as_str())
