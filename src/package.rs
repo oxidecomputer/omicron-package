@@ -603,15 +603,30 @@ impl Package {
     fn get_blobs_inputs(&self, download_directory: &Utf8Path, zoned: bool) -> Result<BuildInputs> {
         let mut inputs = BuildInputs::new();
 
+        // If there are no blobs in the source description, there's no work to
+        // do. It's important to short-circuit here to avoid adding an empty
+        // blob directory entry to zone archives that won't actually contain
+        // any blobs.
+        if self.source.blobs().is_none() && self.source.buildomat_blobs().is_none() {
+            return Ok(inputs);
+        }
+
         let destination_path = if zoned {
-            zone_archive_path(
-                &Utf8Path::new("/opt/oxide")
-                    .join(self.service_name.as_str())
-                    .join(BLOB),
-            )?
+            let dst = Utf8Path::new("/opt/oxide")
+                .join(self.service_name.as_str())
+                .join(BLOB);
+
+            inputs.0.extend(
+                zone_get_all_parent_inputs(&dst)?
+                    .into_iter()
+                    .map(BuildInput::AddDirectory),
+            );
+
+            zone_archive_path(&dst)?
         } else {
             Utf8PathBuf::from(BLOB)
         };
+
         if let Some(s3_blobs) = self.source.blobs() {
             inputs.0.extend(s3_blobs.iter().map(|blob| {
                 let from = download_directory
