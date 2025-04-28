@@ -604,14 +604,21 @@ impl Package {
         let mut inputs = BuildInputs::new();
 
         let destination_path = if zoned {
-            zone_archive_path(
-                &Utf8Path::new("/opt/oxide")
-                    .join(self.service_name.as_str())
-                    .join(BLOB),
-            )?
+            let dst = Utf8Path::new("/opt/oxide")
+                .join(self.service_name.as_str())
+                .join(BLOB);
+
+            inputs.0.extend(
+                zone_get_all_parent_inputs(&dst)?
+                    .into_iter()
+                    .map(BuildInput::AddDirectory),
+            );
+
+            zone_archive_path(&dst)?
         } else {
             Utf8PathBuf::from(BLOB)
         };
+
         if let Some(s3_blobs) = self.source.blobs() {
             inputs.0.extend(s3_blobs.iter().map(|blob| {
                 let from = download_directory
