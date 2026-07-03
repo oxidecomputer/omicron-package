@@ -305,6 +305,28 @@ impl Package {
                     self.get_output_path(name, output_directory),
                 )));
 
+                // Also record the stamped version at a fixed path *inside* the
+                // zone filesystem. The version otherwise lives only in the
+                // top-level `oxide.json` metadata, which is readable from the
+                // global zone (by opening the image tarball) but not from a
+                // process running inside the zone. Writing it here lets such a
+                // process read its own version (e.g. Nexus, for `/v1/version`).
+                //
+                // This mirrors the top-level `VERSION` file that `Tarball`
+                // outputs already carry. The parent directories must be added
+                // before the file, as zone images require parents before their
+                // children.
+                let system_version_path = Utf8Path::new("/var/oxide/system-version");
+                inputs.0.extend(
+                    zone_get_all_parent_inputs(system_version_path.parent().unwrap())?
+                        .into_iter()
+                        .map(BuildInput::AddDirectory),
+                );
+                inputs.0.push(BuildInput::AddInMemoryFile {
+                    dst_path: zone_archive_path(system_version_path)?,
+                    contents: version.to_string(),
+                });
+
                 // Add the package to "itself", but as a stamped version.
                 //
                 // We jump through some hoops to avoid modifying the archive
