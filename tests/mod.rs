@@ -136,6 +136,49 @@ mod test {
         assert!(ents.next().is_none());
     }
 
+    // Stamping a zone package records the version at a fixed path inside the
+    // zone filesystem (in addition to the top-level `oxide.json`), so a
+    // process running in the zone can read its own version.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stamp_zone_writes_system_version() {
+        let cfg = config::parse("tests/service-b/cfg.toml").unwrap();
+        let package = cfg.packages.get(&MY_SERVICE_PACKAGE).unwrap();
+
+        let out = camino_tempfile::tempdir().unwrap();
+        let build_config = BuildConfig::default();
+        package
+            .create(&MY_SERVICE_PACKAGE, out.path(), &build_config)
+            .await
+            .unwrap();
+
+        let expected_semver = semver::Version::new(4, 5, 6);
+        let path = package
+            .stamp(&MY_SERVICE_PACKAGE, out.path(), &expected_semver)
+            .await
+            .unwrap();
+        assert!(path.exists());
+
+        let gzr = flate2::read::GzDecoder::new(File::open(path).unwrap());
+        let mut archive = Archive::new(gzr);
+        let mut ents = archive.entries().unwrap();
+
+        // The OMICRON1(5) format requires oxide.json to be the first entry.
+        assert_eq!("oxide.json", ents.next_path());
+
+        // Somewhere later, the in-zone version file should appear with the
+        // stamped version as its contents.
+        let mut found = None;
+        for entry in ents {
+            let mut entry = entry.unwrap();
+            if entry_path(&entry) == "root/var/oxide/system-version" {
+                let mut s = String::new();
+                entry.read_to_string(&mut s).unwrap();
+                found = Some(s);
+            }
+        }
+        assert_eq!(found.as_deref(), Some(expected_semver.to_string().as_str()));
+    }
+
     // Tests a rust package being placed into a non-Zone image.
     //
     // This is used for building packages that exist in the Global Zone,
